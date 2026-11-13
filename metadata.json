@@ -1,0 +1,6 @@
+{
+  "name": "Zombie Survival Coop",
+  "description": "Protótipo de sobrevivência zumbi cooperativo top-down 2D com Phaser 3, Colyseus e simulação determinística compartilhada.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

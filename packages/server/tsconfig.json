@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "rootDir": "..",
+    "outDir": "./dist",
+    "paths": {
+      "@zombie-coop/shared": ["../shared/src/index.ts"],
+      "@zombie-coop/shared/*": ["../shared/src/*"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist"]
+}

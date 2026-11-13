@@ -1,0 +1,16 @@
+{
+  "name": "@zombie-coop/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "vite build ../../ --config ../../vite.config.ts"
+  },
+  "dependencies": {
+    "@colyseus/schema": "3.0.76",
+    "@zombie-coop/shared": "0.1.0",
+    "colyseus.js": "0.16.22",
+    "phaser": "3.90.0"
+  }
+}
