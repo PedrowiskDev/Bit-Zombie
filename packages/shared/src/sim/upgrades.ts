@@ -1,9 +1,10 @@
 import { BALANCE } from '../config/balance.js';
 import type { SeededRng } from '../math/rng.js';
-import type { LevelUpBonusKind } from '../types/protocol.js';
+import type { LevelUpBonusKind, WeaponId } from '../types/protocol.js';
+import { getWeaponDefinition } from './weapons.js';
 
 /**
- * Identificadores de upgrades do catálogo (Fase 1 + Fase 2).
+ * Identificadores de upgrades do catálogo (Fase 1 + Fase 2 + Etapa 3).
  */
 export type UpgradeId =
   | 'pistol_damage_boost'
@@ -27,6 +28,10 @@ export interface UpgradeEffectModifiers {
   moveSpeedMultiplier?: number;
   maxHpBonus?: number;
   instantHealHp?: number;
+  meleeRangeBonusRatio?: number;
+  meleeArcBonusDeg?: number;
+  meleeDamageMultiplier?: number;
+  meleeKnockbackBonusRatio?: number;
 }
 
 export interface UpgradeDefinition {
@@ -54,6 +59,7 @@ export interface PendingUpgradeOffer {
 }
 
 export interface EffectiveWeaponStats {
+  weaponId: WeaponId;
   damage: number;
   fireRatePerSec: number;
   rangePx: number;
@@ -64,16 +70,23 @@ export interface EffectiveWeaponStats {
   pierceCount: number;
   moveSpeedPxPerSec: number;
   maxHpBonus: number;
+  arcDeg: number;
+  windupMs: number;
+  activeMs: number;
+  recoveryMs: number;
+  knockbackPx: number;
+  reloadSpeedMultiplier: number;
 }
 
 /**
- * Catálogo completo de upgrades (Fase 1 + Fase 2).
+ * Catálogo completo de upgrades revisado na Etapa 3 para beneficiar tanto quem está
+ * apenas com Faca/Bastão quanto quem utiliza Pistola, Escopeta, Submetralhadora ou Rifle.
  */
 export const UPGRADE_CATALOG: Readonly<Record<UpgradeId, UpgradeDefinition>> = {
   pistol_damage_boost: {
     id: 'pistol_damage_boost',
-    name: 'Munição de Ponta Oca',
-    description: '+10% de dano nos disparos da pistola.',
+    name: 'Lâmina Afiada & Ponta Oca',
+    description: '+10% de dano em golpes de faca/bastão e em todas as armas de fogo.',
     category: 'weapon',
     maxStacks: 10,
     modifiersPerStack: {
@@ -82,8 +95,8 @@ export const UPGRADE_CATALOG: Readonly<Record<UpgradeId, UpgradeDefinition>> = {
   },
   pistol_firerate_boost: {
     id: 'pistol_firerate_boost',
-    name: 'Gatilho Aliviado',
-    description: '+8% de cadência de tiro na pistola.',
+    name: 'Reflexo & Gatilho Aliviado',
+    description: '+8% de velocidade de golpe, cadência de tiro e velocidade de recarga.',
     category: 'weapon',
     maxStacks: 10,
     modifiersPerStack: {
@@ -92,42 +105,49 @@ export const UPGRADE_CATALOG: Readonly<Record<UpgradeId, UpgradeDefinition>> = {
   },
   pistol_range_boost: {
     id: 'pistol_range_boost',
-    name: 'Cano Alongado',
-    description: '+35 px de alcance efetivo.',
+    name: 'Envergadura & Cano Alongado',
+    description: '+35 px de alcance nas armas de fogo; +16% de alcance e +10° de arco na faca/bastão.',
     category: 'weapon',
     maxStacks: 5,
     modifiersPerStack: {
       rangeBonusPx: 35,
+      meleeRangeBonusRatio: 0.16,
+      meleeArcBonusDeg: 10,
     },
   },
   pistol_proj_speed_boost: {
     id: 'pistol_proj_speed_boost',
-    name: 'Carga Propelente +P',
-    description: '+12% de velocidade de projétil.',
+    name: 'Impulso Cinético +P',
+    description: '+12% de velocidade de projétil e +20% de empurrão em golpes e disparos.',
     category: 'weapon',
     maxStacks: 5,
     modifiersPerStack: {
       projectileSpeedMultiplier: 0.12,
+      meleeKnockbackBonusRatio: 0.2,
     },
   },
   pistol_multishot_boost: {
     id: 'pistol_multishot_boost',
-    name: 'Cano Duplo Tático',
-    description: '+1 projétil em leque (±7°) por disparo.',
+    name: 'Golpe Amplo & Leque Tático',
+    description: '+1 projétil por disparo; na faca/bastão amplia o arco em +25° e +20% de dano.',
     category: 'weapon',
     maxStacks: 2,
     modifiersPerStack: {
       extraProjectiles: 1,
+      meleeArcBonusDeg: 25,
+      meleeDamageMultiplier: 0.2,
     },
   },
   pistol_pierce_boost: {
     id: 'pistol_pierce_boost',
-    name: 'Munição Perfurante FMJ',
-    description: 'Projéteis atravessam +1 zumbi adicional.',
+    name: 'Impacto Perfurante FMJ',
+    description: 'Projéteis atravessam +1 alvo; na faca/bastão concede +45% de empurrão e +15% de dano.',
     category: 'weapon',
     maxStacks: 3,
     modifiersPerStack: {
       extraPierce: 1,
+      meleeKnockbackBonusRatio: 0.45,
+      meleeDamageMultiplier: 0.15,
     },
   },
   player_move_speed_boost: {
@@ -210,13 +230,13 @@ export function getAutoBonusForLevel(newLevel: number): {
     return {
       bonusKind: 'damage',
       upgradeId: 'pistol_damage_boost',
-      bonusLabel: '+10% Dano da Pistola',
+      bonusLabel: '+10% Dano de Armas',
     };
   }
   return {
     bonusKind: 'fire_rate',
     upgradeId: 'pistol_firerate_boost',
-    bonusLabel: '+8% Cadência de Tiro',
+    bonusLabel: '+8% Cadência & Golpe',
   };
 }
 
@@ -248,11 +268,14 @@ export function getAutomaticUpgradesForLevel(level: number): AppliedUpgradeStack
 }
 
 /**
- * Calcula os atributos efetivos da arma e do jogador a partir do nível atual e dos upgrades aplicados.
+ * Calcula os atributos efetivos da arma (`weaponId`, padrão `'pistol'`) e do jogador
+ * a partir do nível atual e dos upgrades aplicados, integrando efeitos para Faca/Bastão
+ * e Armas de Fogo (Etapa 3).
  */
 export function computeEffectiveWeaponStats(
   level: number,
-  extraUpgrades: readonly AppliedUpgradeStack[] = []
+  extraUpgrades: readonly AppliedUpgradeStack[] = [],
+  weaponId: WeaponId = 'pistol'
 ): EffectiveWeaponStats {
   const autoUpgrades = getAutomaticUpgradesForLevel(level);
   const mergedMap = new Map<UpgradeId, number>();
@@ -271,6 +294,10 @@ export function computeEffectiveWeaponStats(
   let extraPierce = 0;
   let moveSpeedBonusPct = 0;
   let maxHpBonus = 0;
+  let meleeRangeBonusRatio = 0;
+  let meleeArcBonusDeg = 0;
+  let meleeDamageExtraPct = 0;
+  let meleeKnockbackBonusRatio = 0;
 
   for (const [upgradeId, rawStacks] of mergedMap.entries()) {
     const def = UPGRADE_CATALOG[upgradeId];
@@ -302,25 +329,74 @@ export function computeEffectiveWeaponStats(
     if (def.modifiersPerStack.maxHpBonus) {
       maxHpBonus += def.modifiersPerStack.maxHpBonus * clampedStacks;
     }
+    if (def.modifiersPerStack.meleeRangeBonusRatio) {
+      meleeRangeBonusRatio += def.modifiersPerStack.meleeRangeBonusRatio * clampedStacks;
+    }
+    if (def.modifiersPerStack.meleeArcBonusDeg) {
+      meleeArcBonusDeg += def.modifiersPerStack.meleeArcBonusDeg * clampedStacks;
+    }
+    if (def.modifiersPerStack.meleeDamageMultiplier) {
+      meleeDamageExtraPct += def.modifiersPerStack.meleeDamageMultiplier * clampedStacks;
+    }
+    if (def.modifiersPerStack.meleeKnockbackBonusRatio) {
+      meleeKnockbackBonusRatio +=
+        def.modifiersPerStack.meleeKnockbackBonusRatio * clampedStacks;
+    }
   }
 
-  const damageMultiplier = Number((1 + damageBonusPct).toFixed(4));
+  const weaponDef = getWeaponDefinition(weaponId);
+  const isMelee = weaponDef.category === 'melee';
+  const totalDamagePct = isMelee
+    ? damageBonusPct + meleeDamageExtraPct
+    : damageBonusPct;
+
+  const damageMultiplier = Number((1 + totalDamagePct).toFixed(4));
   const fireRateMultiplier = Number((1 + fireRateBonusPct).toFixed(4));
 
+  const effectiveRangePx = isMelee
+    ? Math.round(weaponDef.rangePx * (1 + meleeRangeBonusRatio))
+    : weaponDef.rangePx + rangeBonusPx;
+
+  const effectiveArcDeg = isMelee
+    ? Math.min(200, weaponDef.arcDeg + meleeArcBonusDeg)
+    : 0;
+
+  const effectiveWindupMs = isMelee
+    ? Math.max(25, Math.round(weaponDef.windupMs / fireRateMultiplier))
+    : 0;
+  const effectiveActiveMs = isMelee
+    ? Math.max(35, Math.round(weaponDef.activeMs / fireRateMultiplier))
+    : 0;
+  const effectiveRecoveryMs = isMelee
+    ? Math.max(50, Math.round(weaponDef.recoveryMs / fireRateMultiplier))
+    : 0;
+
+  const effectiveKnockbackPx = Math.round(
+    weaponDef.knockbackPx * (1 + meleeKnockbackBonusRatio)
+  );
+
   return {
-    damage: Number((BALANCE.PISTOL.DAMAGE * damageMultiplier).toFixed(2)),
-    fireRatePerSec: Number((BALANCE.PISTOL.FIRE_RATE_PER_SEC * fireRateMultiplier).toFixed(2)),
-    rangePx: BALANCE.PISTOL.RANGE_PX + rangeBonusPx,
-    projectileSpeedPxPerSec: Math.round(
-      BALANCE.PISTOL.PROJECTILE_SPEED_PX_PER_SEC * (1 + projSpeedBonusPct)
-    ),
+    weaponId,
+    damage: Number((weaponDef.damage * damageMultiplier).toFixed(2)),
+    fireRatePerSec: Number((weaponDef.fireRatePerSec * fireRateMultiplier).toFixed(2)),
+    rangePx: effectiveRangePx,
+    projectileSpeedPxPerSec: isMelee
+      ? 0
+      : Math.round(weaponDef.projectileSpeedPxPerSec * (1 + projSpeedBonusPct)),
     damageMultiplier,
     fireRateMultiplier,
-    projectileCount: 1 + extraProjectiles,
-    pierceCount: extraPierce,
+    projectileCount: isMelee ? 1 : weaponDef.pellets + extraProjectiles,
+    pierceCount: isMelee ? 0 : weaponDef.pierceCount + extraPierce,
     moveSpeedPxPerSec: Number(
       (BALANCE.PLAYER.SPEED_PX_PER_SEC * (1 + moveSpeedBonusPct)).toFixed(2)
     ),
     maxHpBonus,
+    arcDeg: effectiveArcDeg,
+    windupMs: effectiveWindupMs,
+    activeMs: effectiveActiveMs,
+    recoveryMs: effectiveRecoveryMs,
+    knockbackPx: effectiveKnockbackPx,
+    reloadSpeedMultiplier: fireRateMultiplier,
   };
 }
+

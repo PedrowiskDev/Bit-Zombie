@@ -8,9 +8,15 @@ import {
 
 describe('Etapa 7 — Estabilização Final, Stress de 5 Minutos (2 Bots Coop), Anti-Cheat e Ciclo de Partida', () => {
   it('executa 5 minutos contínuos (6.000 ticks a 20 Hz) com 2 bots cooperativos sem exceder MAX_ALIVE (150) e dentro do orçamento de tempo de tick', () => {
-    const sim = new Simulation({ seed: 202607, enableAutoSpawn: true });
+    const sim = new Simulation({
+      seed: 202607,
+      enableAutoSpawn: true,
+      startingWeapon: 'pistol',
+    });
     sim.addPlayer('bot-1', { x: 1960, y: 2000 });
     sim.addPlayer('bot-2', { x: 2040, y: 2000 });
+    sim.addAmmo('bot-1', 'light', 5000);
+    sim.addAmmo('bot-2', 'light', 5000);
 
     const totalTicks = 6000; // 6000 * 50 ms = 300.000 ms (5 minutos)
     const stepTimesMs: number[] = [];
@@ -26,6 +32,9 @@ describe('Etapa 7 — Estabilização Final, Stress de 5 Minutos (2 Bots Coop), 
       for (const p of preSnap.players) {
         if (p.hp < 60) {
           sim.setPlayerHp(p.id, BALANCE.PLAYER.MAX_HP);
+        }
+        if ((p.ammoLight ?? 0) < 60) {
+          sim.addAmmo(p.id, 'light', 240);
         }
       }
 

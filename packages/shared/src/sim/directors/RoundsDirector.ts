@@ -13,12 +13,17 @@ import type {
 export interface QueuedRoundZombie {
   kind: ZombieKind;
   isElite: boolean;
+  speedMultiplier?: number;
 }
 
 export interface RoundsDirectorCallbacks {
   spawnZombieFromDirector: (
     kind: ZombieKind,
-    options: { isElite: boolean; spawnSource: 'round' }
+    options: {
+      isElite: boolean;
+      spawnSource: 'round';
+      speedMultiplier?: number;
+    }
   ) => ZombieStateSnapshot | null;
   emitRoundStarted: (ev: Omit<RoundStartedEvent, 'eventId' | 'tick'>) => void;
   emitRoundCompleted: (ev: Omit<RoundCompletedEvent, 'eventId' | 'tick'>) => void;
@@ -158,6 +163,7 @@ export class RoundsDirector {
       const spawned = callbacks.spawnZombieFromDirector(next.kind, {
         isElite: next.isElite,
         spawnSource: 'round',
+        speedMultiplier: next.speedMultiplier,
       });
       if (spawned) {
         this.pendingQueue.shift();
@@ -273,27 +279,34 @@ export class RoundsDirector {
       );
     }
 
-    const allowFast = roundNumber >= 1;
+    // Na Rodada 1, começa com zumbis comuns (os primeiros mais lentos) para quem inicia de faca
+    const allowFast = roundNumber >= 2;
     const allowBrute = roundNumber >= 2;
 
     while (remainingBudget > 0) {
       const roll = this.rng.nextFloat();
+      const isOpeningSlow =
+        roundNumber === 1 && this.pendingQueue.length < 5;
+      const speedMultiplier = isOpeningSlow
+        ? BALANCE.LOOT.STARTER_SLOW_ZOMBIE_SPEED_FACTOR
+        : 1;
+
       if (
         allowBrute &&
         remainingBudget >= BALANCE.ROUNDS.THREAT_COST.BRUTE &&
         roll < Math.min(0.26, 0.08 + roundNumber * 0.02)
       ) {
-        this.pendingQueue.push({ kind: 'brute', isElite: false });
+        this.pendingQueue.push({ kind: 'brute', isElite: false, speedMultiplier });
         remainingBudget -= BALANCE.ROUNDS.THREAT_COST.BRUTE;
       } else if (
         allowFast &&
         remainingBudget >= BALANCE.ROUNDS.THREAT_COST.FAST &&
         roll < Math.min(0.58, 0.25 + roundNumber * 0.03)
       ) {
-        this.pendingQueue.push({ kind: 'fast', isElite: false });
+        this.pendingQueue.push({ kind: 'fast', isElite: false, speedMultiplier });
         remainingBudget -= BALANCE.ROUNDS.THREAT_COST.FAST;
       } else {
-        this.pendingQueue.push({ kind: 'common', isElite: false });
+        this.pendingQueue.push({ kind: 'common', isElite: false, speedMultiplier });
         remainingBudget -= BALANCE.ROUNDS.THREAT_COST.COMMON;
       }
     }

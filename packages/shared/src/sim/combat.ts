@@ -6,14 +6,35 @@ import {
 } from '../math/collision.js';
 import { clampPositionToArena } from '../math/vec2.js';
 import type {
+  MeleeSwingEvent,
   PlayerDamagedEvent,
   PlayerRevivedEvent,
   PlayerStateSnapshot,
   ProjectileHitEvent,
   WeaponFireEvent,
+  WeaponId,
+  WeaponNoiseEvent,
   ZombieStateSnapshot,
 } from '../types/protocol.js';
 import { getZombieStats } from './spawner.js';
+import type { EffectiveWeaponStats } from './upgrades.js';
+import {
+  angleDifferenceRad,
+  findClosestVisibleZombieInCone,
+  findProjectileObstacleHit,
+  hasLineOfSight,
+  resolveEntityObstacleCollisions,
+  type VisionObstacles,
+} from './vision.js';
+import {
+  getActiveSlotWeaponState,
+  getActiveWeaponId,
+  getWeaponDefinition,
+  startWeaponReload,
+  stepWeaponReload,
+  syncPlayerInventorySnapshotFields,
+  type PlayerWeaponInventory,
+} from './weapons.js';
 
 /**
  * Projétil simulado exclusivamente na `Simulation` (servidor autoritativo / provider local).
@@ -22,12 +43,14 @@ import { getZombieStats } from './spawner.js';
 export interface SimulatedProjectile {
   id: number;
   ownerId: string;
+  weaponId?: WeaponId;
   x: number;
   y: number;
   vx: number;
   vy: number;
   radius: number;
   damage: number;
+  knockbackPx?: number;
   distanceTraveled: number;
   maxRange: number;
   pierceRemaining?: number;
@@ -108,7 +131,8 @@ export function stepZombiesMovementAndSeparation(
   dtSec: number,
   mapWidth: number,
   mapHeight: number,
-  grid: SpatialHashGrid<ZombieStateSnapshot>
+  grid: SpatialHashGrid<ZombieStateSnapshot>,
+  obstacles?: VisionObstacles
 ): void {
   const playerList = Array.from(players);
 
@@ -123,6 +147,8 @@ export function stepZombiesMovementAndSeparation(
     }
 
     const stats = getZombieStats(z.kind, z.isElite);
+    const speedMult = z.speedMultiplier ?? 1;
+    const effectiveSpeed = stats.speedPxPerSec * speedMult;
     const dx = target.x - z.x;
     const dy = target.y - z.y;
     const dist = Math.hypot(dx, dy);
@@ -130,8 +156,8 @@ export function stepZombiesMovementAndSeparation(
     if (dist > 1e-4) {
       const nx = dx / dist;
       const ny = dy / dist;
-      z.vx = nx * stats.speedPxPerSec;
-      z.vy = ny * stats.speedPxPerSec;
+      z.vx = nx * effectiveSpeed;
+      z.vy = ny * effectiveSpeed;
       z.x += z.vx * dtSec;
       z.y += z.vy * dtSec;
       z.facingAngle = Math.atan2(ny, nx);
@@ -171,12 +197,14 @@ export function stepZombiesMovementAndSeparation(
     }
   }
 
-  // 3. Garante que todos os zumbis permaneçam dentro dos limites da arena
+  // 3. Resolve colisão física contra obstáculos sólidos do cenário e limites da arena
   for (let i = 0; i < zombies.length; i += 1) {
     const z = zombies[i];
-    const clamped = clampPositionToArena(z.x, z.y, z.radius, mapWidth, mapHeight);
-    z.x = clamped.x;
-    z.y = clamped.y;
+    const resolved = obstacles
+      ? resolveEntityObstacleCollisions(z.x, z.y, z.radius, obstacles, mapWidth, mapHeight)
+      : clampPositionToArena(z.x, z.y, z.radius, mapWidth, mapHeight);
+    z.x = resolved.x;
+    z.y = resolved.y;
   }
 }
 
@@ -190,7 +218,8 @@ export function resolvePlayerZombieCollisionsAndContactDamage(
   zombies: ZombieStateSnapshot[],
   mapWidth: number,
   mapHeight: number,
-  emitPlayerHit: (ev: Omit<PlayerDamagedEvent, 'eventId' | 'tick'>) => void
+  emitPlayerHit: (ev: Omit<PlayerDamagedEvent, 'eventId' | 'tick'>) => void,
+  obstacles?: VisionObstacles
 ): void {
   const invulnDurationMs = Math.round(BALANCE.PLAYER.INVULN_DURATION_SEC * 1000);
 
@@ -224,13 +253,9 @@ export function resolvePlayerZombieCollisionsAndContactDamage(
         if (col.overlap > 0) {
           z.x -= col.nx * col.overlap;
           z.y -= col.ny * col.overlap;
-          const clampedZombie = clampPositionToArena(
-            z.x,
-            z.y,
-            z.radius,
-            mapWidth,
-            mapHeight
-          );
+          const clampedZombie = obstacles
+            ? resolveEntityObstacleCollisions(z.x, z.y, z.radius, obstacles, mapWidth, mapHeight)
+            : clampPositionToArena(z.x, z.y, z.radius, mapWidth, mapHeight);
           z.x = clampedZombie.x;
           z.y = clampedZombie.y;
         }
@@ -244,23 +269,34 @@ export function resolvePlayerZombieCollisionsAndContactDamage(
         z.x -= col.nx * col.overlap * 0.65;
         z.y -= col.ny * col.overlap * 0.65;
 
-        const clampedPlayer = clampPositionToArena(
-          player.x,
-          player.y,
-          player.radius,
-          mapWidth,
-          mapHeight
-        );
+        const clampedPlayer = obstacles
+          ? resolveEntityObstacleCollisions(
+              player.x,
+              player.y,
+              player.radius,
+              obstacles,
+              mapWidth,
+              mapHeight
+            )
+          : clampPositionToArena(
+              player.x,
+              player.y,
+              player.radius,
+              mapWidth,
+              mapHeight
+            );
         player.x = clampedPlayer.x;
         player.y = clampedPlayer.y;
 
-        const clampedZombie = clampPositionToArena(
-          z.x,
-          z.y,
-          z.radius,
-          mapWidth,
-          mapHeight
-        );
+        const clampedZombie = obstacles
+          ? resolveEntityObstacleCollisions(z.x, z.y, z.radius, obstacles, mapWidth, mapHeight)
+          : clampPositionToArena(
+              z.x,
+              z.y,
+              z.radius,
+              mapWidth,
+              mapHeight
+            );
         z.x = clampedZombie.x;
         z.y = clampedZombie.y;
       }
@@ -307,11 +343,7 @@ export interface WeaponStatsPerPlayer {
 }
 
 /**
- * Executa a mira e o disparo da pistola para cada jogador vivo e conectado:
- * - No modo `'auto'` (padrão): mira e dispara automaticamente no zumbi mais próximo dentro do alcance.
- * - No modo `'manual'`: orienta o jogador pelo vetor `(aimX, aimY)` (ex.: joystick direito no mobile ou mira manual)
- *   e dispara na direção de `facingAngle` quando `firing === true`, respeitando o mesmo cooldown da arma.
- * - Suporta múltiplos projéteis em leque (`projectileCount > 1`, abertura de 7° entre projéteis) e perfuração (`pierceCount`).
+ * Executa a mira e o disparo para cada jogador vivo e conectado (mantido para testes diretos da Etapa 2).
  */
 export function stepAutoFireWeapons(
   players: Iterable<PlayerStateSnapshot>,
@@ -321,9 +353,10 @@ export function stepAutoFireWeapons(
   emitFire: (ev: Omit<WeaponFireEvent, 'eventId' | 'tick'>) => void,
   weaponStats?: WeaponStatsPerPlayer,
   manualAimByPlayer?: ReadonlyMap<string, PlayerManualAimInput>,
-  getPlayerWeaponStats?: (playerId: string) => WeaponStatsPerPlayer
+  getPlayerWeaponStats?: (playerId: string) => WeaponStatsPerPlayer,
+  obstacles?: VisionObstacles
 ): void {
-  const spreadStepRad = (7 * Math.PI) / 180; // 7 graus entre projéteis do leque
+  const spreadStepRad = (7 * Math.PI) / 180;
 
   for (const player of players) {
     if (!player.alive || !player.connected) {
@@ -344,6 +377,10 @@ export function stepAutoFireWeapons(
     const mode = manualState?.aimMode ?? player.aimMode ?? 'auto';
     player.aimMode = mode;
 
+    if (manualState && (manualState.aimX !== 0 || manualState.aimY !== 0)) {
+      player.facingAngle = Math.atan2(manualState.aimY, manualState.aimX);
+    }
+
     const spawnBurst = (baseAngle: number, targetZombieId: number) => {
       player.fireCooldownMs = fireIntervalMs;
       const muzzleOffset = player.radius + 4;
@@ -360,6 +397,7 @@ export function stepAutoFireWeapons(
         projectiles.push({
           id: projId,
           ownerId: player.id,
+          weaponId: 'pistol',
           x: fromX,
           y: fromY,
           vx: dirX * projSpeed,
@@ -376,6 +414,7 @@ export function stepAutoFireWeapons(
           type: 'fire',
           projectileId: projId,
           ownerId: player.id,
+          weaponId: 'pistol',
           targetZombieId,
           fromX,
           fromY,
@@ -388,10 +427,6 @@ export function stepAutoFireWeapons(
     };
 
     if (mode === 'manual') {
-      if (manualState && (manualState.aimX !== 0 || manualState.aimY !== 0)) {
-        player.facingAngle = Math.atan2(manualState.aimY, manualState.aimX);
-      }
-
       if (player.fireCooldownMs > 0 || !manualState?.firing) {
         continue;
       }
@@ -404,31 +439,469 @@ export function stepAutoFireWeapons(
       continue;
     }
 
-    const target = findClosestZombieInRange(
-      player.x,
-      player.y,
-      rangePx,
-      zombies
-    );
+    const target = obstacles
+      ? findClosestVisibleZombieInCone(
+          player.x,
+          player.y,
+          player.facingAngle,
+          rangePx,
+          zombies,
+          obstacles,
+          BALANCE.VISION.CONE_ANGLE_DEG
+        )
+      : findClosestZombieInRange(player.x, player.y, rangePx, zombies);
 
     if (!target) {
+      if (manualState?.firing) {
+        spawnBurst(player.facingAngle, -1);
+      }
       continue;
     }
 
     const dx = target.x - player.x;
     const dy = target.y - player.y;
     const dist = Math.hypot(dx, dy);
-    const dirX = dist > 1e-5 ? dx / dist : Math.cos(player.facingAngle);
-    const dirY = dist > 1e-5 ? dy / dist : Math.sin(player.facingAngle);
+    const shotAngle = dist > 1e-5 ? Math.atan2(dy, dx) : player.facingAngle;
+    spawnBurst(shotAngle, target.id);
+  }
+}
 
-    player.facingAngle = Math.atan2(dirY, dirX);
-    spawnBurst(player.facingAngle, target.id);
+export interface StepPlayerWeaponsContext {
+  players: Iterable<PlayerStateSnapshot>;
+  inventoriesByPlayer: Map<string, PlayerWeaponInventory>;
+  zombies: ZombieStateSnapshot[];
+  projectiles: SimulatedProjectile[];
+  dtMs: number;
+  mapWidth: number;
+  mapHeight: number;
+  manualAimByPlayer: ReadonlyMap<string, PlayerManualAimInput>;
+  getPlayerEffectiveStats: (playerId: string, weaponId: WeaponId) => EffectiveWeaponStats;
+  obstacles: VisionObstacles;
+  allocateProjectileId: () => number;
+  emitFire: (ev: Omit<WeaponFireEvent, 'eventId' | 'tick'>) => void;
+  emitMeleeSwing: (ev: Omit<MeleeSwingEvent, 'eventId' | 'tick'>) => void;
+  emitNoise: (ev: Omit<WeaponNoiseEvent, 'eventId' | 'tick'>) => void;
+  emitHit: (ev: Omit<ProjectileHitEvent, 'eventId' | 'tick'>) => void;
+  onZombieKilled: (zombie: ZombieStateSnapshot, killerId: string) => void;
+  onDamageDealt: (damage: number, ownerId: string) => void;
+}
+
+function applyMeleeActiveArcHits(
+  player: PlayerStateSnapshot,
+  inv: PlayerWeaponInventory,
+  zombies: ZombieStateSnapshot[],
+  mapWidth: number,
+  mapHeight: number,
+  obstacles: VisionObstacles,
+  emitHit: (ev: Omit<ProjectileHitEvent, 'eventId' | 'tick'>) => void,
+  onZombieKilled: (zombie: ZombieStateSnapshot, killerId: string) => void,
+  onDamageDealt: (damage: number, ownerId: string) => void
+): void {
+  const swing = inv.meleeSwing;
+  if (!swing || swing.phase !== 'active') {
+    return;
+  }
+
+  const halfArcRad = ((swing.arcDeg * 0.5) * Math.PI) / 180;
+
+  for (let i = 0; i < zombies.length; i += 1) {
+    const z = zombies[i];
+    if (z.hp <= 0 || swing.hitZombieIds.has(z.id)) {
+      continue;
+    }
+
+    const dx = z.x - player.x;
+    const dy = z.y - player.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > swing.rangePx + z.radius) {
+      continue;
+    }
+
+    if (dist > 1e-4) {
+      const targetAngle = Math.atan2(dy, dx);
+      const angleDiff = angleDifferenceRad(swing.angle, targetAngle);
+      // Permite margem extra quando o zumbi está colado no corpo do jogador
+      const closeAllowance = dist <= player.radius + z.radius + 6 ? 0.35 : 0;
+      if (angleDiff > halfArcRad + closeAllowance) {
+        continue;
+      }
+    }
+
+    // Validação autoritativa de linha de visão: faca e bastão NÃO atravessam paredes ou portas fechadas
+    if (!hasLineOfSight(player.x, player.y, z.x, z.y, obstacles, true)) {
+      continue;
+    }
+
+    // Marca alvo atingido para que cada golpe acerte cada alvo no máximo 1 vez
+    swing.hitZombieIds.add(z.id);
+
+    const actualDamage = Math.min(z.hp, swing.damage);
+    z.hp = Math.max(0, z.hp - swing.damage);
+    const killed = z.hp <= 0;
+
+    if (actualDamage > 0) {
+      player.damageDealt = Number(((player.damageDealt ?? 0) + actualDamage).toFixed(1));
+      onDamageDealt(actualDamage, player.id);
+    }
+
+    // Pequeno empurrão (knockback) na direção oposta ao jogador para permitir escapar
+    if (swing.knockbackPx > 0) {
+      const pushDirX = dist > 1e-4 ? dx / dist : Math.cos(swing.angle);
+      const pushDirY = dist > 1e-4 ? dy / dist : Math.sin(swing.angle);
+      const pushed = resolveEntityObstacleCollisions(
+        z.x + pushDirX * swing.knockbackPx,
+        z.y + pushDirY * swing.knockbackPx,
+        z.radius,
+        obstacles,
+        mapWidth,
+        mapHeight
+      );
+      z.x = pushed.x;
+      z.y = pushed.y;
+    }
+
+    if (killed) {
+      player.kills += 1;
+      onZombieKilled(z, player.id);
+    }
+
+    emitHit({
+      type: 'hit',
+      projectileId: 0,
+      ownerId: player.id,
+      weaponId: swing.weaponId,
+      zombieId: z.id,
+      zombieKind: z.kind,
+      x: z.x,
+      y: z.y,
+      damage: swing.damage,
+      killed,
+    });
   }
 }
 
 /**
- * Avança projéteis ativos no servidor/Simulation e resolve impactos contra zumbis vivos,
- * suportando munição perfurante (`pierceRemaining > 0`) na Fase 2.
+ * Avança as fases de golpe corpo a corpo (`windup` -> `active` -> `recovery`),
+ * recarga com duração, consumo de munição, troca automática de emergência para faca
+ * e disparos de armas de fogo (Etapa 3).
+ */
+export function stepPlayerWeaponsAndMelee(ctx: StepPlayerWeaponsContext): void {
+  const {
+    players,
+    inventoriesByPlayer,
+    zombies,
+    projectiles,
+    dtMs,
+    mapWidth,
+    mapHeight,
+    manualAimByPlayer,
+    getPlayerEffectiveStats,
+    obstacles,
+    allocateProjectileId,
+    emitFire,
+    emitMeleeSwing,
+    emitNoise,
+    emitHit,
+    onZombieKilled,
+    onDamageDealt,
+  } = ctx;
+
+  for (const player of players) {
+    const inv = inventoriesByPlayer.get(player.id);
+    if (!inv) {
+      continue;
+    }
+
+    if (!player.alive || !player.connected) {
+      inv.meleeSwing = null;
+      inv.reloadRemainingMs = 0;
+      inv.reloadTotalMs = 0;
+      inv.reloadingSlot = null;
+      syncPlayerInventorySnapshotFields(player, inv);
+      continue;
+    }
+
+    const manualState = manualAimByPlayer.get(player.id);
+    const mode = manualState?.aimMode ?? player.aimMode ?? 'auto';
+    player.aimMode = mode;
+
+    if (manualState && (manualState.aimX !== 0 || manualState.aimY !== 0)) {
+      player.facingAngle = Math.atan2(manualState.aimY, manualState.aimX);
+    }
+
+    // 1. Avança recarga em andamento
+    stepWeaponReload(inv, dtMs);
+
+    // 2. Avança golpe corpo a corpo em andamento (windup -> active -> recovery)
+    if (inv.meleeSwing) {
+      const swing = inv.meleeSwing;
+      swing.angle = player.facingAngle;
+
+      if (swing.phase === 'active') {
+        applyMeleeActiveArcHits(
+          player,
+          inv,
+          zombies,
+          mapWidth,
+          mapHeight,
+          obstacles,
+          emitHit,
+          onZombieKilled,
+          onDamageDealt
+        );
+      }
+
+      let remainingToConsume = dtMs;
+      while (remainingToConsume > 0 && inv.meleeSwing) {
+        const cur = inv.meleeSwing;
+        if (cur.phaseRemainingMs > remainingToConsume) {
+          cur.phaseRemainingMs -= remainingToConsume;
+          remainingToConsume = 0;
+          if (cur.phase === 'active') {
+            applyMeleeActiveArcHits(
+              player,
+              inv,
+              zombies,
+              mapWidth,
+              mapHeight,
+              obstacles,
+              emitHit,
+              onZombieKilled,
+              onDamageDealt
+            );
+          }
+        } else {
+          remainingToConsume -= cur.phaseRemainingMs;
+          if (cur.phase === 'windup') {
+            cur.phase = 'active';
+            cur.phaseRemainingMs = cur.activeMs;
+            applyMeleeActiveArcHits(
+              player,
+              inv,
+              zombies,
+              mapWidth,
+              mapHeight,
+              obstacles,
+              emitHit,
+              onZombieKilled,
+              onDamageDealt
+            );
+          } else if (cur.phase === 'active') {
+            cur.phase = 'recovery';
+            cur.phaseRemainingMs = cur.recoveryMs;
+          } else {
+            inv.meleeSwing = null;
+          }
+        }
+      }
+
+      syncPlayerInventorySnapshotFields(player, inv);
+      continue;
+    }
+
+    // Se estiver recarregando ou em cooldown entre disparos/golpes, sincroniza e aguarda
+    if (inv.reloadRemainingMs > 0 || player.fireCooldownMs > 0) {
+      syncPlayerInventorySnapshotFields(player, inv);
+      continue;
+    }
+
+    // 3. Verifica arma ativa e munição no carregador
+    let activeWeaponId = getActiveWeaponId(inv);
+    let activeDef = getWeaponDefinition(activeWeaponId);
+    const slotState = getActiveSlotWeaponState(inv);
+
+    if (
+      activeDef.category === 'firearm' &&
+      slotState &&
+      slotState.magAmmo <= 0
+    ) {
+      const reserve =
+        activeDef.ammoType !== 'none' ? inv.ammoReserve[activeDef.ammoType] : 0;
+      if (reserve > 0) {
+        const effReload = getPlayerEffectiveStats(player.id, activeWeaponId);
+        startWeaponReload(inv, effReload.reloadSpeedMultiplier);
+        syncPlayerInventorySnapshotFields(player, inv);
+        continue;
+      }
+      // Sem munição no carregador e sem reserva: a faca permanece acessível como recurso de emergência
+      activeWeaponId = 'knife';
+      activeDef = getWeaponDefinition('knife');
+    }
+
+    const effStats = getPlayerEffectiveStats(player.id, activeWeaponId);
+
+    const triggerMeleeSwing = (attackAngle: number) => {
+      const totalCycleMs =
+        effStats.windupMs + effStats.activeMs + effStats.recoveryMs;
+      player.fireCooldownMs = totalCycleMs;
+      inv.meleeSwing = {
+        weaponId: activeWeaponId,
+        phase: 'windup',
+        phaseRemainingMs: effStats.windupMs,
+        windupMs: effStats.windupMs,
+        activeMs: effStats.activeMs,
+        recoveryMs: effStats.recoveryMs,
+        angle: attackAngle,
+        arcDeg: effStats.arcDeg,
+        rangePx: effStats.rangePx,
+        damage: effStats.damage,
+        knockbackPx: effStats.knockbackPx,
+        hitZombieIds: new Set<number>(),
+      };
+
+      emitMeleeSwing({
+        type: 'melee_swing',
+        ownerId: player.id,
+        weaponId: activeWeaponId,
+        x: player.x,
+        y: player.y,
+        angle: attackAngle,
+        arcDeg: effStats.arcDeg,
+        rangePx: effStats.rangePx,
+      });
+
+      emitNoise({
+        type: 'weapon_noise',
+        ownerId: player.id,
+        weaponId: activeWeaponId,
+        x: player.x,
+        y: player.y,
+        radiusPx: activeDef.noiseRadiusPx,
+      });
+    };
+
+    const triggerFirearmBurst = (baseAngle: number, targetZombieId: number) => {
+      if (!slotState || slotState.magAmmo <= 0) {
+        return;
+      }
+      slotState.magAmmo = Math.max(0, slotState.magAmmo - 1);
+      player.fireCooldownMs = 1000 / effStats.fireRatePerSec;
+
+      const projectileCount = Math.max(1, effStats.projectileCount);
+      const spreadStepRad =
+        ((activeDef.spreadDeg > 0 ? activeDef.spreadDeg : 5) * Math.PI) / 180;
+      const muzzleOffset = player.radius + 4;
+
+      for (let shotIdx = 0; shotIdx < projectileCount; shotIdx += 1) {
+        const offsetIndex = shotIdx - (projectileCount - 1) / 2;
+        const shotAngle = baseAngle + offsetIndex * spreadStepRad;
+        const dirX = Math.cos(shotAngle);
+        const dirY = Math.sin(shotAngle);
+        const fromX = player.x + dirX * muzzleOffset;
+        const fromY = player.y + dirY * muzzleOffset;
+        const projId = allocateProjectileId();
+
+        projectiles.push({
+          id: projId,
+          ownerId: player.id,
+          weaponId: activeWeaponId,
+          x: fromX,
+          y: fromY,
+          vx: dirX * effStats.projectileSpeedPxPerSec,
+          vy: dirY * effStats.projectileSpeedPxPerSec,
+          radius: activeDef.projectileRadius || BALANCE.PISTOL.PROJECTILE_RADIUS,
+          damage: effStats.damage,
+          knockbackPx: effStats.knockbackPx,
+          distanceTraveled: 0,
+          maxRange: effStats.rangePx,
+          pierceRemaining: effStats.pierceCount,
+          hitZombieIds: effStats.pierceCount > 0 ? new Set<number>() : undefined,
+        });
+
+        emitFire({
+          type: 'fire',
+          projectileId: projId,
+          ownerId: player.id,
+          weaponId: activeWeaponId,
+          targetZombieId,
+          fromX,
+          fromY,
+          dirX,
+          dirY,
+          speed: effStats.projectileSpeedPxPerSec,
+          range: effStats.rangePx,
+        });
+      }
+
+      emitNoise({
+        type: 'weapon_noise',
+        ownerId: player.id,
+        weaponId: activeWeaponId,
+        x: player.x,
+        y: player.y,
+        radiusPx: activeDef.noiseRadiusPx,
+      });
+
+      // Se esvaziou o carregador neste disparo e há munição na reserva, inicia recarga automática
+      if (
+        slotState.magAmmo <= 0 &&
+        activeDef.ammoType !== 'none' &&
+        inv.ammoReserve[activeDef.ammoType] > 0
+      ) {
+        startWeaponReload(inv, effStats.reloadSpeedMultiplier);
+      }
+    };
+
+    if (mode === 'manual') {
+      if (manualState?.firing) {
+        if (activeDef.category === 'melee') {
+          triggerMeleeSwing(player.facingAngle);
+        } else {
+          triggerFirearmBurst(player.facingAngle, -1);
+        }
+      }
+      syncPlayerInventorySnapshotFields(player, inv);
+      continue;
+    }
+
+    // Modo automático: seleciona apenas inimigos dentro do cone de visão atual (110°) e com linha de visão válida
+    const target = findClosestVisibleZombieInCone(
+      player.x,
+      player.y,
+      player.facingAngle,
+      effStats.rangePx,
+      zombies,
+      obstacles,
+      BALANCE.VISION.CONE_ANGLE_DEG
+    );
+
+    if (!target) {
+      if (manualState?.firing) {
+        if (activeDef.category === 'melee') {
+          triggerMeleeSwing(player.facingAngle);
+        } else {
+          triggerFirearmBurst(player.facingAngle, -1);
+        }
+      }
+      syncPlayerInventorySnapshotFields(player, inv);
+      continue;
+    }
+
+    const dx = target.x - player.x;
+    const dy = target.y - player.y;
+    const dist = Math.hypot(dx, dy);
+    const attackAngle = dist > 1e-5 ? Math.atan2(dy, dx) : player.facingAngle;
+
+    if (activeDef.category === 'melee') {
+      triggerMeleeSwing(attackAngle);
+    } else {
+      triggerFirearmBurst(attackAngle, target.id);
+    }
+
+    syncPlayerInventorySnapshotFields(player, inv);
+  }
+
+  // Remove zumbis abatidos por golpes corpo a corpo
+  for (let i = zombies.length - 1; i >= 0; i -= 1) {
+    if (zombies[i].hp <= 0) {
+      zombies.splice(i, 1);
+    }
+  }
+}
+
+/**
+ * Avança projéteis ativos no servidor/Simulation e resolve impactos contra obstáculos sólidos e zumbis vivos,
+ * suportando munição perfurante (`pierceRemaining > 0`), empurrão (`knockbackPx`) e bloqueio por paredes/obstáculos (Etapa 2 + Etapa 3).
  */
 export function stepProjectilesAndHits(
   projectiles: SimulatedProjectile[],
@@ -439,13 +912,19 @@ export function stepProjectilesAndHits(
   mapHeight: number,
   onZombieKilled: (zombie: ZombieStateSnapshot, killerId: string) => void,
   emitHit: (ev: Omit<ProjectileHitEvent, 'eventId' | 'tick'>) => void,
-  onDamageDealt?: (damage: number, ownerId: string) => void
+  onDamageDealt?: (damage: number, ownerId: string) => void,
+  obstacles?: VisionObstacles
 ): void {
   for (let i = projectiles.length - 1; i >= 0; i -= 1) {
     const proj = projectiles[i];
     const nextX = proj.x + proj.vx * dtSec;
     const nextY = proj.y + proj.vy * dtSec;
     const stepDist = Math.hypot(nextX - proj.x, nextY - proj.y);
+
+    // Verifica colisão com paredes/obstáculos sólidos ao longo do segmento
+    const obstacleHit = obstacles
+      ? findProjectileObstacleHit(proj.x, proj.y, nextX, nextY, obstacles)
+      : null;
 
     // Encontra o primeiro zumbi vivo atingido ao longo do segmento (proj.x, proj.y) -> (nextX, nextY)
     let earliestT = Number.POSITIVE_INFINITY;
@@ -478,10 +957,39 @@ export function stepProjectilesAndHits(
       }
     }
 
+    // Se bateu em uma parede ou obstáculo sólido antes de atingir o zumbi, o projétil é bloqueado
+    if (obstacleHit && obstacleHit.tRatio < earliestT) {
+      projectiles.splice(i, 1);
+      continue;
+    }
+
     if (hitZombie) {
       const actualDamage = Math.min(hitZombie.hp, proj.damage);
       hitZombie.hp = Math.max(0, hitZombie.hp - proj.damage);
       const killed = hitZombie.hp <= 0;
+
+      // Aplica empurrão (knockback) do projétil se configurado (ex.: escopeta/rifle)
+      if (!killed && proj.knockbackPx && proj.knockbackPx > 0) {
+        const speed = Math.hypot(proj.vx, proj.vy) || 1;
+        const pushed = obstacles
+          ? resolveEntityObstacleCollisions(
+              hitZombie.x + (proj.vx / speed) * proj.knockbackPx,
+              hitZombie.y + (proj.vy / speed) * proj.knockbackPx,
+              hitZombie.radius,
+              obstacles,
+              mapWidth,
+              mapHeight
+            )
+          : clampPositionToArena(
+              hitZombie.x + (proj.vx / speed) * proj.knockbackPx,
+              hitZombie.y + (proj.vy / speed) * proj.knockbackPx,
+              hitZombie.radius,
+              mapWidth,
+              mapHeight
+            );
+        hitZombie.x = pushed.x;
+        hitZombie.y = pushed.y;
+      }
 
       const shooter = playersById.get(proj.ownerId);
       if (shooter && actualDamage > 0) {
@@ -502,6 +1010,7 @@ export function stepProjectilesAndHits(
         type: 'hit',
         projectileId: proj.id,
         ownerId: proj.ownerId,
+        weaponId: proj.weaponId,
         zombieId: hitZombie.id,
         zombieKind: hitZombie.kind,
         x: impactX,

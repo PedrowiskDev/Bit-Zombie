@@ -23,9 +23,15 @@ describe('Etapa 1 — Separação dos dois modos (Rodadas vs Exploração e Abri
   });
 
   it('Modo 1 (Sobrevivência por Rodadas): conclui rodada finita, abre intervalo de 25s e avança quando todos os jogadores vivos concordam', () => {
-    const sim = new Simulation({ seed: 4242, gameMode: 'rounds' });
+    const sim = new Simulation({
+      seed: 4242,
+      gameMode: 'rounds',
+      startingWeapon: 'pistol',
+    });
     sim.addPlayer('p1', { x: 2000, y: 2000 }, 0);
     sim.addPlayer('p2', { x: 2040, y: 2000 }, 1);
+    sim.addAmmo('p1', 'light', 500);
+    sim.addAmmo('p2', 'light', 500);
 
     // Passo 1 inicia a Rodada 1 e gera o primeiro zumbi da fila
     sim.step(BALANCE.SIMULATION.TICK_DT_MS, {});
@@ -100,12 +106,17 @@ describe('Etapa 1 — Separação dos dois modos (Rodadas vs Exploração e Abri
     expect(b5).toBeGreaterThan(b1);
     expect(b5Coop).toBeGreaterThan(b5);
 
-    const sim = new Simulation({ seed: 5555, gameMode: 'rounds' });
+    const sim = new Simulation({
+      seed: 5555,
+      gameMode: 'rounds',
+      startingWeapon: 'pistol',
+    });
     sim.addPlayer('p1', { x: 2000, y: 2000 }, 0);
+    sim.addAmmo('p1', 'light', 2000);
     sim.addSharedXp(5000);
 
     // Avança até a Rodada 5 concluindo as rodadas 1..4 e pulando os intervalos
-    for (let step = 0; step < 3000; step += 1) {
+    for (let step = 0; step < 5000; step += 1) {
       const cur = sim.getSnapshot();
       if (cur.roundsState.roundNumber === 5 && cur.zombies.some((z) => z.isElite)) {
         break;
@@ -114,17 +125,22 @@ describe('Etapa 1 — Separação dos dois modos (Rodadas vs Exploração e Abri
         sim.requestSkipRoundIntermission('p1');
         continue;
       }
-      const z = cur.zombies[0];
       const p1 = cur.players[0]!;
-      const dx = z ? z.x - p1.x : 0;
+      if (p1.hp < 60) {
+        sim.setPlayerHp('p1', BALANCE.PLAYER.MAX_HP);
+      }
+      const z = cur.zombies[0];
+      const dx = z ? z.x - p1.x : 1;
       const dy = z ? z.y - p1.y : 0;
       const dist = Math.hypot(dx, dy) || 1;
       sim.step(BALANCE.SIMULATION.TICK_DT_MS, {
         p1: {
           seq: step + 1,
-          dx: dist > 200 ? dx / dist : 0,
-          dy: dist > 200 ? dy / dist : 0,
+          dx: dist > 100 ? dx / dist : 0,
+          dy: dist > 100 ? dy / dist : 0,
           aimMode: 'auto',
+          aimX: dx / dist,
+          aimY: dy / dist,
         },
       });
     }

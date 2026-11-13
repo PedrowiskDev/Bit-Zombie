@@ -48,6 +48,10 @@ export class KeyboardController {
     return normalizeInputVector(dx, dy);
   }
 
+  isAttackHeld(): boolean {
+    return this.pressedCodes.has('Space') || this.pressedCodes.has('KeyF');
+  }
+
   clear(): void {
     this.pressedCodes.clear();
   }
@@ -61,20 +65,20 @@ export class KeyboardController {
   }
 
   private handleKeyDown(ev: KeyboardEvent): void {
-    if (this.isMovementKey(ev.code)) {
+    if (this.isHandledKey(ev.code)) {
       ev.preventDefault();
       this.pressedCodes.add(ev.code);
     }
   }
 
   private handleKeyUp(ev: KeyboardEvent): void {
-    if (this.isMovementKey(ev.code)) {
+    if (this.isHandledKey(ev.code)) {
       ev.preventDefault();
       this.pressedCodes.delete(ev.code);
     }
   }
 
-  private isMovementKey(code: string): boolean {
+  private isHandledKey(code: string): boolean {
     return (
       code === 'KeyW' ||
       code === 'KeyA' ||
@@ -83,7 +87,9 @@ export class KeyboardController {
       code === 'ArrowUp' ||
       code === 'ArrowLeft' ||
       code === 'ArrowDown' ||
-      code === 'ArrowRight'
+      code === 'ArrowRight' ||
+      code === 'Space' ||
+      code === 'KeyF'
     );
   }
 }

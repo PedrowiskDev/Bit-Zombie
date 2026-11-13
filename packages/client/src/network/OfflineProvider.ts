@@ -2,10 +2,15 @@ import {
   BALANCE,
   Simulation,
   normalizeInputVector,
+  type AmmoType,
+  type EquippedSlotId,
   type GameEvent,
   type GameMode,
   type PlayerStateSnapshot,
+  type ResourceKind,
+  type StructureKind,
   type Vec2,
+  type WeaponId,
   type WorldSnapshot,
   type ZombieStateSnapshot,
 } from '@zombie-coop/shared';
@@ -85,6 +90,92 @@ export class OfflineProvider implements IWorldProvider {
     }
   }
 
+  /** Troca o slot de arma ativo (Etapa 3) */
+  switchWeaponSlot(slot: EquippedSlotId): void {
+    if (this.sim.switchPlayerSlot(this.localPlayerId, slot)) {
+      this.currSnapshot = this.sim.getSnapshot();
+      this.prevSnapshot = this.currSnapshot;
+    }
+  }
+
+  /** Inicia recarga da arma de fogo ativa (Etapa 3) */
+  reloadWeapon(): void {
+    if (this.sim.reloadPlayerWeapon(this.localPlayerId)) {
+      this.currSnapshot = this.sim.getSnapshot();
+      this.prevSnapshot = this.currSnapshot;
+    }
+  }
+
+  /** Interage com recipiente ou loot no chão (Etapa 3) */
+  interactLoot(): void {
+    if (this.sim.interactPlayerLoot(this.localPlayerId)) {
+      this.currSnapshot = this.sim.getSnapshot();
+      this.prevSnapshot = this.currSnapshot;
+      this.collectSimulationEvents();
+    }
+  }
+
+  /** Constrói fortificação ou armadilha à frente do jogador local (Etapa 4) */
+  buildStructure(kind: StructureKind): void {
+    if (this.sim.buildPlayerStructure(this.localPlayerId, kind)) {
+      this.currSnapshot = this.sim.getSnapshot();
+      this.prevSnapshot = this.currSnapshot;
+      this.collectSimulationEvents();
+    }
+  }
+
+  /** Repara a fortificação danificada mais próxima gastando 1 Madeira (Etapa 4) */
+  repairStructure(): void {
+    if (this.sim.repairNearestStructure(this.localPlayerId)) {
+      this.currSnapshot = this.sim.getSnapshot();
+      this.prevSnapshot = this.currSnapshot;
+      this.collectSimulationEvents();
+    }
+  }
+
+  /** Usa 1 Kit Médico para restaurar HP do jogador local (Etapa 4) */
+  useMedkit(): void {
+    if (this.sim.usePlayerMedkit(this.localPlayerId)) {
+      this.currSnapshot = this.sim.getSnapshot();
+      this.prevSnapshot = this.currSnapshot;
+      this.collectSimulationEvents();
+    }
+  }
+
+  /** Método auxiliar para adicionar recursos em testes da Etapa 4 */
+  addResourceForTest(kind: ResourceKind, amount: number): void {
+    this.sim.addResource(this.localPlayerId, kind, amount);
+    this.currSnapshot = this.sim.getSnapshot();
+    this.prevSnapshot = this.currSnapshot;
+  }
+
+  /** Método auxiliar para conceder uma arma diretamente em testes da Etapa 3 */
+  giveWeaponForTest(weaponId: WeaponId): boolean {
+    const ok = this.sim.giveWeapon(this.localPlayerId, weaponId);
+    this.currSnapshot = this.sim.getSnapshot();
+    this.prevSnapshot = this.currSnapshot;
+    return ok;
+  }
+
+  /** Método auxiliar para spawnar loot no chão em testes da Etapa 3 */
+  spawnLootForTest(options: {
+    x: number;
+    y: number;
+    kind: 'weapon' | 'ammo';
+    weaponId?: WeaponId;
+    ammoType?: Exclude<AmmoType, 'none'>;
+    ammoAmount?: number;
+    label?: string;
+  }): number {
+    const item = this.sim.spawnLootItem({
+      ...options,
+      label: options.label ?? options.weaponId ?? options.ammoType ?? 'Loot',
+    });
+    this.currSnapshot = this.sim.getSnapshot();
+    this.prevSnapshot = this.currSnapshot;
+    return item.id;
+  }
+
   /** Método auxiliar para testar resgate cooperativo de aliado caído (Fase 2) */
   spawnDownedAllyForTest(x?: number, y?: number): void {
     const local = this.currSnapshot.players.find((p) => p.id === this.localPlayerId);
@@ -95,6 +186,32 @@ export class OfflineProvider implements IWorldProvider {
     this.currSnapshot = this.sim.getSnapshot();
     this.prevSnapshot = this.currSnapshot;
     this.collectSimulationEvents();
+  }
+
+  /** Método auxiliar para testar posicionamento de zumbis e visão na Etapa 2 */
+  spawnZombieForTest(
+    kind: 'common' | 'fast' | 'brute',
+    x: number,
+    y: number
+  ): number | null {
+    const z = this.sim.spawnZombie(kind, { x, y });
+    this.currSnapshot = this.sim.getSnapshot();
+    this.prevSnapshot = this.currSnapshot;
+    return z ? z.id : null;
+  }
+
+  /** Método auxiliar para adicionar parede de bloqueio de visão/tiro em testes da Etapa 2 */
+  addWallSegmentForTest(x1: number, y1: number, x2: number, y2: number): void {
+    this.sim.addWallSegment({
+      x1,
+      y1,
+      x2,
+      y2,
+      blocksVision: true,
+      blocksProjectiles: true,
+    });
+    this.currSnapshot = this.sim.getSnapshot();
+    this.prevSnapshot = this.currSnapshot;
   }
 
   updateFrame(frameDtMs: number, rawInput: Vec2, aimInput?: FrameAimInput): void {
@@ -111,6 +228,8 @@ export class OfflineProvider implements IWorldProvider {
       ? normalizeInputVector(aimInput.aimX, aimInput.aimY)
       : { x: 0, y: 0 };
 
+    let consumedOneShotActions = false;
+
     while (this.accumulatorMs >= tickMs && !this.currSnapshot.gameOver) {
       this.accumulatorMs -= tickMs;
       this.prevSnapshot = this.currSnapshot;
@@ -125,8 +244,15 @@ export class OfflineProvider implements IWorldProvider {
           aimX: normAim.x,
           aimY: normAim.y,
           firing: Boolean(aimInput?.firing),
+          switchSlot: !consumedOneShotActions ? aimInput?.switchSlot : undefined,
+          reload: !consumedOneShotActions ? aimInput?.reload : undefined,
+          interact: !consumedOneShotActions ? aimInput?.interact : undefined,
+          buildStructure: !consumedOneShotActions ? aimInput?.buildStructure : undefined,
+          repairStructure: !consumedOneShotActions ? aimInput?.repairStructure : undefined,
+          useMedkit: !consumedOneShotActions ? aimInput?.useMedkit : undefined,
         },
       });
+      consumedOneShotActions = true;
 
       this.currSnapshot = this.sim.getSnapshot();
       this.collectSimulationEvents();
@@ -196,6 +322,9 @@ export class OfflineProvider implements IWorldProvider {
       players: interpolatedPlayers,
       zombies: interpolatedZombies,
       props: this.currSnapshot.props,
+      lootItems: this.currSnapshot.lootItems,
+      lootContainers: this.currSnapshot.lootContainers,
+      structures: this.currSnapshot.structures,
       roundsState: this.currSnapshot.roundsState,
       explorationState: this.currSnapshot.explorationState,
       interpolationAlpha: alpha,

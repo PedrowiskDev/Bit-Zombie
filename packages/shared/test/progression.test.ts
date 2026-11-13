@@ -90,7 +90,11 @@ describe('Etapa 5 — XP Compartilhado, Nível, Bônus Automáticos, Catálogo d
   });
 
   it('permite alternar entre tiro automático (auto) e tiro manual pelo lado direito (manual)', () => {
-    const sim = new Simulation({ seed: 5002, enableAutoSpawn: false });
+    const sim = new Simulation({
+      seed: 5002,
+      enableAutoSpawn: false,
+      startingWeapon: 'pistol',
+    });
     sim.addPlayer('p1', { x: 2000, y: 2000 });
     // Zumbi comum à direita (a 120 px de distância)
     sim.spawnZombie('common', { x: 2120, y: 2000 });
@@ -133,7 +137,7 @@ describe('Etapa 5 — XP Compartilhado, Nível, Bônus Automáticos, Catálogo d
     expect(evManualFire[0].dirX).toBeCloseTo(0, 4);
     expect(evManualFire[0].dirY).toBeCloseTo(-1, 4);
 
-    // 3. Avança ticks até zerar cooldown da pistola (7 ticks = 350 ms > 333.3 ms) e volta para modo Automático ('auto')
+    // 3. Avança ticks até zerar cooldown da pistola (7 ticks = 350 ms > 333.3 ms), olha para a direita e volta para modo Automático ('auto')
     for (let i = 3; i <= 9; i += 1) {
       sim.step(tickMs, {
         p1: {
@@ -141,6 +145,8 @@ describe('Etapa 5 — XP Compartilhado, Nível, Bônus Automáticos, Catálogo d
           dx: 0,
           dy: 0,
           aimMode: 'auto',
+          aimX: 1,
+          aimY: 0,
         },
       });
     }

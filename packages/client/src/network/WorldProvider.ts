@@ -1,13 +1,18 @@
 import type {
   AimMode,
+  BuildableStructureSnapshot,
+  EquippedSlotId,
   ExplorationModeStateSnapshot,
   GameEvent,
   GameMode,
+  LootContainerSnapshot,
   PlayerStateSnapshot,
   PropData,
   RoomPhase,
   RoundsModeStateSnapshot,
+  StructureKind,
   Vec2,
+  WorldLootItemSnapshot,
   ZombieStateSnapshot,
 } from '@zombie-coop/shared';
 
@@ -24,6 +29,12 @@ export interface FrameAimInput {
   aimX: number;
   aimY: number;
   firing: boolean;
+  switchSlot?: EquippedSlotId;
+  reload?: boolean;
+  interact?: boolean;
+  buildStructure?: StructureKind;
+  repairStructure?: boolean;
+  useMedkit?: boolean;
 }
 
 export interface RenderWorldState {
@@ -52,8 +63,14 @@ export interface RenderWorldState {
   players: PlayerStateSnapshot[];
   /** Lista de zumbis já interpolados para o frame visual atual */
   zombies: ZombieStateSnapshot[];
-  /** Props decorativos sem colisão */
+  /** Props decorativos e obstáculos sólidos do cenário */
   props: PropData[];
+  /** Itens de loot no chão (armas e munições — Etapa 3) */
+  lootItems?: WorldLootItemSnapshot[];
+  /** Recipientes pesquisáveis no mapa (Etapa 3) */
+  lootContainers?: LootContainerSnapshot[];
+  /** Estruturas construídas pela dupla (barricadas e armadilhas — Etapa 4) */
+  structures?: BuildableStructureSnapshot[];
   /** Estado do Diretor de Rodadas (quando gameMode === 'rounds') */
   roundsState?: RoundsModeStateSnapshot;
   /** Estado do Diretor de Exploração e Hordas (quando gameMode === 'exploration') */
@@ -109,6 +126,36 @@ export interface IWorldProvider {
    * Envia a escolha de uma carta de upgrade na Fase 2 sem pausar a partida.
    */
   chooseUpgrade?(upgradeId: string): void;
+
+  /**
+   * Troca o slot equipado do jogador local (`knife`, `slot1`, `slot2` — Etapa 3).
+   */
+  switchWeaponSlot?(slot: EquippedSlotId): void;
+
+  /**
+   * Inicia recarga da arma de fogo equipada no momento (Etapa 3).
+   */
+  reloadWeapon?(): void;
+
+  /**
+   * Interage para abrir recipiente pesquisável ou coletar arma/munição próxima (Etapa 3).
+   */
+  interactLoot?(): void;
+
+  /**
+   * Constrói fortificação/armadilha à frente do jogador local (`wood_barricade`, `scrap_barricade`, `spike_trap` — Etapa 4).
+   */
+  buildStructure?(kind: StructureKind): void;
+
+  /**
+   * Repara a fortificação danificada mais próxima gastando 1 Madeira (Etapa 4).
+   */
+  repairStructure?(): void;
+
+  /**
+   * Usa 1 Kit Médico para restaurar HP do jogador local (Etapa 4).
+   */
+  useMedkit?(): void;
 
   /**
    * Encerra conexão/recursos do provider.

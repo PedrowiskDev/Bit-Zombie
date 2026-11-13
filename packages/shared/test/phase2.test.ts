@@ -66,7 +66,11 @@ describe('Fase 2 — Escolha Interativa de Upgrades (Sem Pausar Coop), Multishot
   });
 
   it('aplica upgrades táticos da Fase 2: Tiro Duplo em Leque (multishot), Perfuração (pierce) e Colete + Kit Médico', () => {
-    const sim = new Simulation({ seed: 9911, enableAutoSpawn: false });
+    const sim = new Simulation({
+      seed: 9911,
+      enableAutoSpawn: false,
+      startingWeapon: 'pistol',
+    });
     sim.addPlayer('p1', { x: 2000, y: 2000 });
     sim.setPlayerHp('p1', 60);
 

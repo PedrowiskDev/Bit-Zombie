@@ -174,6 +174,7 @@ export function createZombieEntity(
   options?: {
     isElite?: boolean;
     spawnSource?: ZombieStateSnapshot['spawnSource'];
+    speedMultiplier?: number;
   }
 ): ZombieStateSnapshot {
   const isElite = Boolean(options?.isElite);
@@ -191,5 +192,6 @@ export function createZombieEntity(
     maxHp: stats.hp,
     isElite,
     spawnSource: options?.spawnSource ?? 'manual',
+    speedMultiplier: options?.speedMultiplier ?? 1,
   };
 }

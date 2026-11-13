@@ -12,18 +12,23 @@ export interface JoystickVisualState {
 
 export interface RightAimStickState {
   active: boolean;
+  hasAimed: boolean;
   firing: boolean;
   aimX: number;
   aimY: number;
 }
 
 /**
- * Controlador de Joysticks Virtuais Duplos (Twin-Stick) para celular (Portrait e Landscape) e ponteiro:
- * - Metade esquerda da tela (`x <= logicalWidth * 0.5`): Joystick de Movimento (8 direções / analógico normalizado).
- * - Metade direita da tela (`x > logicalWidth * 0.5`): Joystick de Mira e Disparo Manual (quando o modo Manual está ativo).
- * - Suporta multi-toque simultâneo (um dedo movendo na esquerda e outro mirando/atirando na direita).
- * - Adapta as coordenadas de repouso automaticamente ao alternar entre Portrait (`540x960`) e Landscape (`960x540`).
- * - Zera imediatamente ao soltar (`pointerup`), cancelar (`pointercancel`) ou perder foco (`blur`).
+ * Controlador de entrada multiplataforma para Etapa 2 (PC Mouse + Celular Twin-Stick):
+ * - Celular (Touch):
+ *   - Metade esquerda da tela (`x <= logicalWidth * 0.5`): Joystick de Movimento.
+ *   - Metade direita da tela (`x > logicalWidth * 0.5`): Joystick de Mira Direcional (orienta o cone de visão).
+ *   - Ao soltar o joystick direito, mantém a última direção olhada (`rightAimVector` preservado).
+ *   - Olhar ao redor com o joystick direito NÃO dispara sozinho (evita gastar munição apenas girando a visão).
+ *   - O ataque manual no celular é acionado pelo botão dedicado de Ataque (`setAttackButtonHeld`).
+ * - PC (Mouse):
+ *   - O cursor do mouse orienta continuamente a direção da visão.
+ *   - O clique esquerdo do mouse (`button === 0`) executa o ataque (`mouseAttackHeld`).
  */
 export class VirtualJoystick {
   private readonly targetElement: HTMLElement;
@@ -41,13 +46,19 @@ export class VirtualJoystick {
   private leftKnobY = 420;
   private leftVector: Vec2 = { x: 0, y: 0 };
 
-  // Estado do Joystick Direito (Mira e Tiro Manual no lado direito da tela)
+  // Estado do Joystick Direito (Mira Direcional no lado direito da tela)
   private rightPointerId: number | null = null;
   private rightBaseX = 824;
   private rightBaseY = 420;
   private rightKnobX = 824;
   private rightKnobY = 420;
   private rightAimVector: Vec2 = { x: 1, y: 0 };
+  private hasRightAimed = false;
+
+  // Estado do Mouse (PC) e Botão de Ataque Dedicado (Mobile/HUD)
+  private mouseLogicalPos: Vec2 | null = null;
+  private mouseAttackHeld = false;
+  private attackButtonHeld = false;
 
   private readonly onPointerDownBound: (ev: PointerEvent) => void;
   private readonly onPointerMoveBound: (ev: PointerEvent) => void;
@@ -107,7 +118,7 @@ export class VirtualJoystick {
     }
     this.logicalWidth = width;
     this.logicalHeight = height;
-    this.reset();
+    this.recomputeRestPositions();
   }
 
   getVector(): Vec2 {
@@ -130,7 +141,8 @@ export class VirtualJoystick {
     const active = this.rightPointerId !== null;
     return {
       active,
-      firing: active,
+      hasAimed: this.hasRightAimed,
+      firing: this.attackButtonHeld || this.mouseAttackHeld,
       aimX: this.rightAimVector.x,
       aimY: this.rightAimVector.y,
     };
@@ -148,9 +160,35 @@ export class VirtualJoystick {
     };
   }
 
+  getMouseLogicalPosition(): Vec2 | null {
+    return this.mouseLogicalPos;
+  }
+
+  isAttackHeld(): boolean {
+    return this.attackButtonHeld || this.mouseAttackHeld;
+  }
+
+  setAttackButtonHeld(held: boolean): void {
+    this.attackButtonHeld = held;
+  }
+
+  /**
+   * Permite definir ou atualizar a direção da mira (mantendo a última direção ao soltar).
+   */
+  setAimDirection(aimX: number, aimY: number): void {
+    const norm = normalizeInputVector(aimX, aimY);
+    if (norm.x !== 0 || norm.y !== 0) {
+      this.rightAimVector = norm;
+      this.hasRightAimed = true;
+      this.mouseLogicalPos = null;
+    }
+  }
+
   reset(): void {
     this.resetLeft();
     this.resetRight();
+    this.mouseAttackHeld = false;
+    this.attackButtonHeld = false;
   }
 
   private defaultRestCoords(): {
@@ -203,6 +241,8 @@ export class VirtualJoystick {
     this.rightBaseY = coords.rightY;
     this.rightKnobX = coords.rightX;
     this.rightKnobY = coords.rightY;
+    // Importante (Etapa 2): this.rightAimVector NÃO é zerado ao soltar a mira,
+    // preservando a última direção olhada pelo jogador.
   }
 
   destroy(): void {
@@ -223,7 +263,16 @@ export class VirtualJoystick {
       return;
     }
 
-    // Metade esquerda da tela: Movimento
+    // No PC (mouse): clique esquerdo executa o ataque e atualiza a posição da mira
+    if (ev.pointerType === 'mouse') {
+      this.mouseLogicalPos = pos;
+      if (ev.button === 0) {
+        this.mouseAttackHeld = true;
+      }
+      return;
+    }
+
+    // Metade esquerda da tela (Touch): Joystick de Movimento
     if (pos.x <= this.logicalWidth * 0.5) {
       if (this.leftPointerId !== null) {
         return;
@@ -239,11 +288,12 @@ export class VirtualJoystick {
       return;
     }
 
-    // Metade direita da tela: Mira e Tiro Manual
+    // Metade direita da tela (Touch): Joystick de Mira Direcional (orienta visão sem disparar sozinho)
     if (this.rightPointerId !== null) {
       return;
     }
     ev.preventDefault();
+    this.mouseLogicalPos = null;
     this.rightPointerId = ev.pointerId;
     this.rightBaseX = pos.x;
     this.rightBaseY = pos.y;
@@ -253,6 +303,14 @@ export class VirtualJoystick {
   }
 
   private handlePointerMove(ev: PointerEvent): void {
+    if (ev.pointerType === 'mouse' && this.leftPointerId === null && this.rightPointerId === null) {
+      const pos = this.clientToLogical(ev.clientX, ev.clientY);
+      if (pos) {
+        this.mouseLogicalPos = pos;
+      }
+      return;
+    }
+
     if (this.leftPointerId !== null && ev.pointerId === this.leftPointerId) {
       ev.preventDefault();
       const pos = this.clientToLogical(ev.clientX, ev.clientY);
@@ -307,10 +365,14 @@ export class VirtualJoystick {
         x: Math.cos(angle),
         y: Math.sin(angle),
       };
+      this.hasRightAimed = true;
     }
   }
 
   private handlePointerUpOrCancel(ev: PointerEvent): void {
+    if (ev.pointerType === 'mouse' && ev.button === 0) {
+      this.mouseAttackHeld = false;
+    }
     if (this.leftPointerId !== null && ev.pointerId === this.leftPointerId) {
       ev.preventDefault();
       this.resetLeft();

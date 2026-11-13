@@ -2,10 +2,19 @@ import { Client, Room, ServerError } from '@colyseus/core';
 import {
   BALANCE,
   Simulation,
+  isValidStructureKind,
+  type EquippedSlotId,
   type GameMode,
   type TickInputMap,
 } from '@zombie-coop/shared';
-import { PlayerSchema, SurvivalRoomState, ZombieSchema } from '../schema/RoomState.js';
+import {
+  LootContainerSchema,
+  LootItemSchema,
+  PlayerSchema,
+  StructureSchema,
+  SurvivalRoomState,
+  ZombieSchema,
+} from '../schema/RoomState.js';
 import { PlayerInputQueue } from './inputValidator.js';
 import { roomRegistry } from './roomCode.js';
 
@@ -266,6 +275,92 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
       }
     });
 
+    this.onMessage('switch_slot', (client, payload: unknown) => {
+      if (this.state.phase !== 'playing') {
+        return;
+      }
+      const rawSlot =
+        typeof payload === 'object' &&
+        payload !== null &&
+        typeof (payload as Record<string, unknown>).slot === 'string'
+          ? (payload as Record<string, unknown>).slot
+          : payload;
+      if (rawSlot === 'knife' || rawSlot === 'slot1' || rawSlot === 'slot2') {
+        if (this.sim.switchPlayerSlot(client.sessionId, rawSlot as EquippedSlotId)) {
+          this.syncSimulationToSchema();
+        }
+      }
+    });
+
+    this.onMessage('reload_weapon', (client) => {
+      if (this.state.phase !== 'playing') {
+        return;
+      }
+      if (this.sim.reloadPlayerWeapon(client.sessionId)) {
+        this.syncSimulationToSchema();
+      }
+    });
+
+    this.onMessage('interact_loot', (client) => {
+      if (this.state.phase !== 'playing') {
+        return;
+      }
+      if (this.sim.interactPlayerLoot(client.sessionId)) {
+        this.syncSimulationToSchema();
+        const events = this.sim.consumeEvents();
+        if (events.length > 0) {
+          this.broadcast('events', events);
+        }
+      }
+    });
+
+    this.onMessage('build_structure', (client, payload: unknown) => {
+      if (this.state.phase !== 'playing') {
+        return;
+      }
+      const rawKind =
+        typeof payload === 'object' &&
+        payload !== null &&
+        typeof (payload as Record<string, unknown>).kind === 'string'
+          ? (payload as Record<string, unknown>).kind
+          : payload;
+      if (isValidStructureKind(rawKind)) {
+        if (this.sim.buildPlayerStructure(client.sessionId, rawKind)) {
+          this.syncSimulationToSchema();
+          const events = this.sim.consumeEvents();
+          if (events.length > 0) {
+            this.broadcast('events', events);
+          }
+        }
+      }
+    });
+
+    this.onMessage('repair_structure', (client) => {
+      if (this.state.phase !== 'playing') {
+        return;
+      }
+      if (this.sim.repairNearestStructure(client.sessionId)) {
+        this.syncSimulationToSchema();
+        const events = this.sim.consumeEvents();
+        if (events.length > 0) {
+          this.broadcast('events', events);
+        }
+      }
+    });
+
+    this.onMessage('use_medkit', (client) => {
+      if (this.state.phase !== 'playing') {
+        return;
+      }
+      if (this.sim.usePlayerMedkit(client.sessionId)) {
+        this.syncSimulationToSchema();
+        const events = this.sim.consumeEvents();
+        if (events.length > 0) {
+          this.broadcast('events', events);
+        }
+      }
+    });
+
     this.onMessage('ping', (client, payload: unknown) => {
       const clientSentAt =
         typeof payload === 'object' &&
@@ -341,6 +436,9 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
     this.state.phase = 'playing';
     this.state.gameOver = false;
     this.state.zombies.clear();
+    this.state.lootItems.clear();
+    this.state.lootContainers.clear();
+    this.state.structures.clear();
 
     this.sim = new Simulation({ seed: nextSeed, gameMode });
 
@@ -456,6 +554,81 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
         this.state.zombies.delete(existingKey);
       }
     }
+
+    // Sincroniza itens de loot no chão (Etapa 3)
+    const activeLootKeys = new Set<string>();
+    for (const item of snap.lootItems ?? []) {
+      const key = String(item.id);
+      activeLootKeys.add(key);
+      let lSchema = this.state.lootItems.get(key);
+      if (!lSchema) {
+        lSchema = new LootItemSchema();
+        lSchema.id = item.id;
+        lSchema.kind = item.kind;
+        lSchema.x = item.x;
+        lSchema.y = item.y;
+        lSchema.weaponId = item.weaponId ?? '';
+        lSchema.magAmmo = item.magAmmo ?? 0;
+        lSchema.ammoType = item.ammoType ?? '';
+        lSchema.ammoAmount = item.ammoAmount ?? 0;
+        lSchema.label = item.label;
+        this.state.lootItems.set(key, lSchema);
+      }
+    }
+    for (const existingKey of Array.from(this.state.lootItems.keys())) {
+      if (!activeLootKeys.has(existingKey)) {
+        this.state.lootItems.delete(existingKey);
+      }
+    }
+
+    // Sincroniza recipientes pesquisáveis (Etapa 3)
+    const activeContainerKeys = new Set<string>();
+    for (const c of snap.lootContainers ?? []) {
+      const key = String(c.id);
+      activeContainerKeys.add(key);
+      let cSchema = this.state.lootContainers.get(key);
+      if (!cSchema) {
+        cSchema = new LootContainerSchema();
+        cSchema.id = c.id;
+        cSchema.kind = c.kind;
+        cSchema.x = c.x;
+        cSchema.y = c.y;
+        cSchema.label = c.label;
+        this.state.lootContainers.set(key, cSchema);
+      }
+      cSchema.opened = c.opened;
+    }
+    for (const existingKey of Array.from(this.state.lootContainers.keys())) {
+      if (!activeContainerKeys.has(existingKey)) {
+        this.state.lootContainers.delete(existingKey);
+      }
+    }
+
+    // Sincroniza estruturas construídas (Etapa 4)
+    const activeStructureKeys = new Set<string>();
+    for (const s of snap.structures ?? []) {
+      const key = String(s.id);
+      activeStructureKeys.add(key);
+      let sSchema = this.state.structures.get(key);
+      if (!sSchema) {
+        sSchema = new StructureSchema();
+        sSchema.id = s.id;
+        sSchema.kind = s.kind;
+        sSchema.x = s.x;
+        sSchema.y = s.y;
+        sSchema.radius = s.radius;
+        sSchema.maxHp = s.maxHp;
+        sSchema.ownerId = s.ownerId;
+        sSchema.label = s.label;
+        this.state.structures.set(key, sSchema);
+      }
+      sSchema.hp = s.hp;
+    }
+    for (const existingKey of Array.from(this.state.structures.keys())) {
+      if (!activeStructureKeys.has(existingKey)) {
+        this.state.structures.delete(existingKey);
+      }
+    }
   }
 
   private copyPlayerSnapshotToSchema(
@@ -486,6 +659,21 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
     dst.readyForNextRound = Boolean(src.readyForNextRound);
     dst.damageDealt = Math.round(src.damageDealt ?? 0);
     dst.revivesCount = src.revivesCount ?? 0;
+    dst.activeSlot = src.activeSlot ?? 'knife';
+    dst.activeWeaponId = src.activeWeaponId ?? 'knife';
+    dst.slot1WeaponId = src.slot1WeaponId ?? '';
+    dst.slot1MagAmmo = src.slot1MagAmmo ?? 0;
+    dst.slot2WeaponId = src.slot2WeaponId ?? '';
+    dst.slot2MagAmmo = src.slot2MagAmmo ?? 0;
+    dst.ammoLight = src.ammoLight ?? 0;
+    dst.ammoShells = src.ammoShells ?? 0;
+    dst.ammoHeavy = src.ammoHeavy ?? 0;
+    dst.reloadRemainingMs = Math.round(src.reloadRemainingMs ?? 0);
+    dst.reloadTotalMs = Math.round(src.reloadTotalMs ?? 0);
+    dst.meleePhase = src.meleePhase ?? 'idle';
+    dst.wood = src.wood ?? 0;
+    dst.scrap = src.scrap ?? 0;
+    dst.medkits = src.medkits ?? 0;
   }
 
   private syncRegistrySummary(): void {

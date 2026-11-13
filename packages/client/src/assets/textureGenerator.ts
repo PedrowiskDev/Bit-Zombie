@@ -1,6 +1,13 @@
 import Phaser from 'phaser';
 import { SeededRng } from '@zombie-coop/shared';
 
+/**
+ * Fator de supersampling (3x HiDPI/Retina) para todas as texturas procedurais.
+ * Garante nitidez máxima em telas mobile/desktop de alta densidade (DPR 2x–3x)
+ * mantendo exatamente o mesmo tamanho lógico no mundo via `setScale(1 / TEXTURE_SCALE)`.
+ */
+export const TEXTURE_SCALE = 3;
+
 export const TEXTURE_KEYS = {
   GROUND_TILE: 'ground_tile',
   PLAYER_BLUE: 'player_blue',
@@ -17,9 +24,73 @@ export const TEXTURE_KEYS = {
   PROP_RUBBLE: 'prop_rubble',
 } as const;
 
+interface HiDpiGraphics {
+  fillStyle(color: number, alpha?: number): void;
+  lineStyle(lineWidth: number, color: number, alpha?: number): void;
+  fillRect(x: number, y: number, w: number, h: number): void;
+  strokeRect(x: number, y: number, w: number, h: number): void;
+  fillRoundedRect(x: number, y: number, w: number, h: number, radius: number): void;
+  fillCircle(x: number, y: number, r: number): void;
+  fillTriangle(
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    x3: number,
+    y3: number
+  ): void;
+  beginPath(): void;
+  moveTo(x: number, y: number): void;
+  lineTo(x: number, y: number): void;
+  closePath(): void;
+  fillPath(): void;
+  strokePath(): void;
+  generateTexture(key: string, width: number, height: number): void;
+  destroy(): void;
+}
+
+function makeHiDpiGraphics(scene: Phaser.Scene, scale = TEXTURE_SCALE): HiDpiGraphics {
+  const g = scene.make.graphics({ x: 0, y: 0 });
+  return {
+    fillStyle: (color, alpha = 1) => g.fillStyle(color, alpha),
+    lineStyle: (lineWidth, color, alpha = 1) =>
+      g.lineStyle(lineWidth * scale, color, alpha),
+    fillRect: (x, y, w, h) => g.fillRect(x * scale, y * scale, w * scale, h * scale),
+    strokeRect: (x, y, w, h) =>
+      g.strokeRect(x * scale, y * scale, w * scale, h * scale),
+    fillRoundedRect: (x, y, w, h, radius) =>
+      g.fillRoundedRect(
+        x * scale,
+        y * scale,
+        w * scale,
+        h * scale,
+        radius * scale
+      ),
+    fillCircle: (x, y, r) => g.fillCircle(x * scale, y * scale, r * scale),
+    fillTriangle: (x1, y1, x2, y2, x3, y3) =>
+      g.fillTriangle(
+        x1 * scale,
+        y1 * scale,
+        x2 * scale,
+        y2 * scale,
+        x3 * scale,
+        y3 * scale
+      ),
+    beginPath: () => g.beginPath(),
+    moveTo: (x, y) => g.moveTo(x * scale, y * scale),
+    lineTo: (x, y) => g.lineTo(x * scale, y * scale),
+    closePath: () => g.closePath(),
+    fillPath: () => g.fillPath(),
+    strokePath: () => g.strokePath(),
+    generateTexture: (key, width, height) =>
+      g.generateTexture(key, Math.round(width * scale), Math.round(height * scale)),
+    destroy: () => g.destroy(),
+  };
+}
+
 /**
- * Gera todas as texturas do jogo por código no BootScene usando `Phaser.GameObjects.Graphics`
- * e `generateTexture()`, sem depender de imagens externas.
+ * Gera todas as texturas do jogo por código no BootScene em alta definição (3x supersampling),
+ * sem depender de imagens externas.
  */
 export function generateAllTextures(scene: Phaser.Scene): void {
   generateGroundTileTexture(scene);
@@ -42,7 +113,7 @@ function generateGroundTileTexture(scene: Phaser.Scene): void {
 
   const size = 256;
   const rng = new SeededRng(42001);
-  const g = scene.make.graphics({ x: 0, y: 0 });
+  const g = makeHiDpiGraphics(scene);
 
   g.fillStyle(0x1b201c, 1);
   g.fillRect(0, 0, size, size);
@@ -90,7 +161,7 @@ function generatePlayerTexture(
   const size = 44;
   const cx = 22;
   const cy = 22;
-  const g = scene.make.graphics({ x: 0, y: 0 });
+  const g = makeHiDpiGraphics(scene);
 
   g.fillStyle(0x000000, 0.35);
   g.fillCircle(cx, cy + 2, 15);
@@ -126,7 +197,7 @@ function generateCommonZombieTexture(scene: Phaser.Scene): void {
   const size = 44;
   const cx = 22;
   const cy = 22;
-  const g = scene.make.graphics({ x: 0, y: 0 });
+  const g = makeHiDpiGraphics(scene);
 
   g.fillStyle(0x000000, 0.35);
   g.fillCircle(cx, cy + 2, 15);
@@ -164,7 +235,7 @@ function generateFastZombieTexture(scene: Phaser.Scene): void {
   const size = 40;
   const cx = 20;
   const cy = 20;
-  const g = scene.make.graphics({ x: 0, y: 0 });
+  const g = makeHiDpiGraphics(scene);
 
   g.fillStyle(0x000000, 0.32);
   g.fillCircle(cx, cy + 2, 12);
@@ -214,7 +285,7 @@ function generateBruteZombieTexture(scene: Phaser.Scene): void {
   const size = 60;
   const cx = 30;
   const cy = 30;
-  const g = scene.make.graphics({ x: 0, y: 0 });
+  const g = makeHiDpiGraphics(scene);
 
   g.fillStyle(0x000000, 0.42);
   g.fillCircle(cx, cy + 3, 23);
@@ -247,7 +318,7 @@ function generateBruteZombieTexture(scene: Phaser.Scene): void {
 
 function generateProjectileAndEffectTextures(scene: Phaser.Scene): void {
   if (!scene.textures.exists(TEXTURE_KEYS.PROJECTILE)) {
-    const g = scene.make.graphics({ x: 0, y: 0 });
+    const g = makeHiDpiGraphics(scene);
     g.fillStyle(0xffe787, 1);
     g.fillRoundedRect(0, 1, 14, 4, 2);
     g.fillStyle(0xffffff, 1);
@@ -257,7 +328,7 @@ function generateProjectileAndEffectTextures(scene: Phaser.Scene): void {
   }
 
   if (!scene.textures.exists(TEXTURE_KEYS.MUZZLE_FLASH)) {
-    const g = scene.make.graphics({ x: 0, y: 0 });
+    const g = makeHiDpiGraphics(scene);
     g.fillStyle(0xffae38, 0.85);
     g.fillCircle(10, 10, 9);
     g.fillStyle(0xfff5cc, 1);
@@ -267,7 +338,7 @@ function generateProjectileAndEffectTextures(scene: Phaser.Scene): void {
   }
 
   if (!scene.textures.exists(TEXTURE_KEYS.PARTICLE_HIT)) {
-    const g = scene.make.graphics({ x: 0, y: 0 });
+    const g = makeHiDpiGraphics(scene);
     g.fillStyle(0xffffff, 1);
     g.fillCircle(4, 4, 4);
     g.generateTexture(TEXTURE_KEYS.PARTICLE_HIT, 8, 8);
@@ -282,7 +353,7 @@ function generateCarPropTexture(scene: Phaser.Scene): void {
 
   const w = 88;
   const h = 46;
-  const g = scene.make.graphics({ x: 0, y: 0 });
+  const g = makeHiDpiGraphics(scene);
 
   g.fillStyle(0x090b0a, 0.45);
   g.fillRoundedRect(4, 5, w - 6, h - 6, 8);
@@ -311,7 +382,7 @@ function generateCratePropTexture(scene: Phaser.Scene): void {
   }
 
   const size = 34;
-  const g = scene.make.graphics({ x: 0, y: 0 });
+  const g = makeHiDpiGraphics(scene);
 
   g.fillStyle(0x090b0a, 0.4);
   g.fillRect(4, 4, size - 4, size - 4);
@@ -337,7 +408,7 @@ function generateBushPropTexture(scene: Phaser.Scene): void {
   }
 
   const size = 44;
-  const g = scene.make.graphics({ x: 0, y: 0 });
+  const g = makeHiDpiGraphics(scene);
 
   g.fillStyle(0x0b0e0c, 0.35);
   g.fillCircle(22, 24, 16);
@@ -366,7 +437,7 @@ function generateRubblePropTexture(scene: Phaser.Scene): void {
   }
 
   const size = 36;
-  const g = scene.make.graphics({ x: 0, y: 0 });
+  const g = makeHiDpiGraphics(scene);
 
   g.fillStyle(0x2a2f2c, 0.85);
   g.fillCircle(12, 18, 6);

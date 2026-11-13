@@ -1,3 +1,8 @@
+import {
+  resolveEntityObstacleCollisions,
+  type VisionObstacles,
+} from '../sim/vision.js';
+
 export interface Vec2 {
   x: number;
   y: number;
@@ -55,7 +60,8 @@ export function clampPositionToArena(
 
 /**
  * Aplica um único passo puro de movimento a partir de uma posição inicial,
- * direção de entrada (dx, dy), velocidade em px/s, delta em segundos e limites do mapa.
+ * direção de entrada (dx, dy), velocidade em px/s, delta em segundos, limites do mapa
+ * e obstáculos sólidos opcionais do cenário.
  */
 export function stepEntityMovement(
   x: number,
@@ -66,18 +72,21 @@ export function stepEntityMovement(
   dtSec: number,
   radius: number,
   mapWidth: number,
-  mapHeight: number
+  mapHeight: number,
+  obstacles?: VisionObstacles
 ): { x: number; y: number; vx: number; vy: number } {
   const norm = normalizeInputVector(dx, dy);
   const vx = norm.x * speedPxPerSec;
   const vy = norm.y * speedPxPerSec;
   const nextX = x + vx * dtSec;
   const nextY = y + vy * dtSec;
-  const clamped = clampPositionToArena(nextX, nextY, radius, mapWidth, mapHeight);
+  const resolved = obstacles
+    ? resolveEntityObstacleCollisions(nextX, nextY, radius, obstacles, mapWidth, mapHeight)
+    : clampPositionToArena(nextX, nextY, radius, mapWidth, mapHeight);
 
   return {
-    x: clamped.x,
-    y: clamped.y,
+    x: resolved.x,
+    y: resolved.y,
     vx,
     vy,
   };

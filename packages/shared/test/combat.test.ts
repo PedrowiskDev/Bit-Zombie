@@ -121,7 +121,11 @@ describe('Simulation — Etapa 3: Zumbis, Spawn, Colisões, Combate Automático,
   });
 
   it('aplica dano de contato e respeita o intervalo de invulnerabilidade de 0,8 s (16 ticks)', () => {
-    const sim = new Simulation({ seed: 704, enableAutoSpawn: false });
+    const sim = new Simulation({
+      seed: 704,
+      enableAutoSpawn: false,
+      startingWeapon: 'pistol',
+    });
     sim.addPlayer('p1', { x: 2000, y: 2000 });
     sim.consumeEvents(); // Limpa player_spawned
 
@@ -155,7 +159,11 @@ describe('Simulation — Etapa 3: Zumbis, Spawn, Colisões, Combate Automático,
   });
 
   it('dispara automaticamente no zumbi mais próximo dentro do alcance (320 px), simula projétil e abate com 3 tiros (30 HP / 12 dano)', () => {
-    const sim = new Simulation({ seed: 705, enableAutoSpawn: false });
+    const sim = new Simulation({
+      seed: 705,
+      enableAutoSpawn: false,
+      startingWeapon: 'pistol',
+    });
     sim.addPlayer('p1', { x: 2000, y: 2000 });
     sim.consumeEvents();
 

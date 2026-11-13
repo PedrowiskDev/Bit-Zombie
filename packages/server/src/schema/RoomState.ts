@@ -32,6 +32,21 @@ export class PlayerSchema extends Schema {
   @type('boolean') readyForNextRound: boolean = false;
   @type('number') damageDealt: number = 0;
   @type('number') revivesCount: number = 0;
+  @type('string') activeSlot: string = 'knife';
+  @type('string') activeWeaponId: string = 'knife';
+  @type('string') slot1WeaponId: string = '';
+  @type('number') slot1MagAmmo: number = 0;
+  @type('string') slot2WeaponId: string = '';
+  @type('number') slot2MagAmmo: number = 0;
+  @type('number') ammoLight: number = 0;
+  @type('number') ammoShells: number = 0;
+  @type('number') ammoHeavy: number = 0;
+  @type('number') reloadRemainingMs: number = 0;
+  @type('number') reloadTotalMs: number = 0;
+  @type('string') meleePhase: string = 'idle';
+  @type('number') wood: number = BALANCE.SURVIVAL.STARTING_WOOD;
+  @type('number') scrap: number = BALANCE.SURVIVAL.STARTING_SCRAP;
+  @type('number') medkits: number = BALANCE.SURVIVAL.STARTING_MEDKITS;
 }
 
 export class ZombieSchema extends Schema {
@@ -46,6 +61,39 @@ export class ZombieSchema extends Schema {
   @type('number') hp: number = BALANCE.ZOMBIES.COMMON.HP;
   @type('number') maxHp: number = BALANCE.ZOMBIES.COMMON.HP;
   @type('boolean') isElite: boolean = false;
+}
+
+export class LootItemSchema extends Schema {
+  @type('number') id: number = 0;
+  @type('string') kind: string = 'weapon';
+  @type('number') x: number = 0;
+  @type('number') y: number = 0;
+  @type('string') weaponId: string = '';
+  @type('number') magAmmo: number = 0;
+  @type('string') ammoType: string = '';
+  @type('number') ammoAmount: number = 0;
+  @type('string') label: string = '';
+}
+
+export class LootContainerSchema extends Schema {
+  @type('number') id: number = 0;
+  @type('string') kind: string = 'supply_crate';
+  @type('number') x: number = 0;
+  @type('number') y: number = 0;
+  @type('boolean') opened: boolean = false;
+  @type('string') label: string = '';
+}
+
+export class StructureSchema extends Schema {
+  @type('number') id: number = 0;
+  @type('string') kind: string = 'wood_barricade';
+  @type('number') x: number = 0;
+  @type('number') y: number = 0;
+  @type('number') radius: number = 20;
+  @type('number') hp: number = 180;
+  @type('number') maxHp: number = 180;
+  @type('string') ownerId: string = '';
+  @type('string') label: string = '';
 }
 
 export class SurvivalRoomState extends Schema {
@@ -94,5 +142,8 @@ export class SurvivalRoomState extends Schema {
 
   @type({ map: PlayerSchema }) players = new MapSchema<PlayerSchema>();
   @type({ map: ZombieSchema }) zombies = new MapSchema<ZombieSchema>();
+  @type({ map: LootItemSchema }) lootItems = new MapSchema<LootItemSchema>();
+  @type({ map: LootContainerSchema }) lootContainers = new MapSchema<LootContainerSchema>();
+  @type({ map: StructureSchema }) structures = new MapSchema<StructureSchema>();
 }
 

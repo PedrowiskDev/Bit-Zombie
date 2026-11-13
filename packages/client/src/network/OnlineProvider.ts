@@ -1,23 +1,34 @@
 import { Client, Room, getStateCallbacks } from 'colyseus.js';
 import {
   BALANCE,
+  buildObstaclesFromProps,
   generateMapProps,
   interpolateRemoteEntities,
   normalizeInputVector,
   reconcileLocalPlayer,
   stepEntityMovement,
+  type AmmoType,
+  type BuildableStructureSnapshot,
+  type EquippedSlotId,
   type ExplorationModeStateSnapshot,
   type ExplorationSubPhase,
   type GameEvent,
   type GameMode,
   type InputCmd,
+  type LootContainerKind,
+  type LootContainerSnapshot,
+  type MeleeAttackPhase,
   type PlayerStateSnapshot,
   type PropData,
   type RoomPhase,
   type RoundSubPhase,
   type RoundsModeStateSnapshot,
+  type StructureKind,
   type TimedEntitySnapshot,
   type Vec2,
+  type VisionObstacles,
+  type WeaponId,
+  type WorldLootItemSnapshot,
   type ZombieKind,
   type ZombieStateSnapshot,
 } from '@zombie-coop/shared';
@@ -52,6 +63,21 @@ interface RemotePlayerSchemaView {
   readyForNextRound: boolean;
   damageDealt: number;
   revivesCount: number;
+  activeSlot?: string;
+  activeWeaponId?: string;
+  slot1WeaponId?: string;
+  slot2WeaponId?: string;
+  slot1MagAmmo?: number;
+  slot2MagAmmo?: number;
+  ammoLight?: number;
+  ammoShells?: number;
+  ammoHeavy?: number;
+  reloadRemainingMs?: number;
+  reloadTotalMs?: number;
+  meleePhase?: string;
+  wood?: number;
+  scrap?: number;
+  medkits?: number;
 }
 
 interface RemoteZombieSchemaView {
@@ -66,6 +92,39 @@ interface RemoteZombieSchemaView {
   hp: number;
   maxHp: number;
   isElite: boolean;
+}
+
+interface RemoteLootItemSchemaView {
+  id: number;
+  kind: string;
+  x: number;
+  y: number;
+  weaponId: string;
+  magAmmo: number;
+  ammoType: string;
+  ammoAmount: number;
+  label: string;
+}
+
+interface RemoteLootContainerSchemaView {
+  id: number;
+  kind: string;
+  x: number;
+  y: number;
+  opened: boolean;
+  label: string;
+}
+
+interface RemoteStructureSchemaView {
+  id: number;
+  kind: string;
+  x: number;
+  y: number;
+  radius: number;
+  hp: number;
+  maxHp: number;
+  ownerId: string;
+  label: string;
 }
 
 interface RemoteRoomStateView {
@@ -109,6 +168,9 @@ interface RemoteRoomStateView {
   sectorsExplored: number;
   players: Map<string, RemotePlayerSchemaView>;
   zombies: Map<string, RemoteZombieSchemaView>;
+  lootItems: Map<string, RemoteLootItemSchemaView>;
+  lootContainers: Map<string, RemoteLootContainerSchemaView>;
+  structures: Map<string, RemoteStructureSchemaView>;
 }
 
 export interface OnlineProviderCallbacks {
@@ -159,6 +221,7 @@ export class OnlineProvider implements IWorldProvider {
   private weaponFireRate: number = BALANCE.PISTOL.FIRE_RATE_PER_SEC;
   private lastLevelBonusLabel = '';
   private props: PropData[] = generateMapProps(BALANCE.SIMULATION.DEFAULT_SEED);
+  private visionObstacles: VisionObstacles = buildObstaclesFromProps(this.props);
 
   private roundsState: RoundsModeStateSnapshot = {
     roundNumber: 1,
@@ -194,6 +257,9 @@ export class OnlineProvider implements IWorldProvider {
   // Estado autoritativo mais recente recebido do servidor
   private readonly authoritativePlayers = new Map<string, PlayerStateSnapshot>();
   private readonly authoritativeZombies = new Map<number, ZombieStateSnapshot>();
+  private readonly authoritativeLootItems = new Map<number, WorldLootItemSnapshot>();
+  private readonly authoritativeLootContainers = new Map<number, LootContainerSnapshot>();
+  private readonly authoritativeStructures = new Map<number, BuildableStructureSnapshot>();
 
   // Predição e reconciliação do jogador local
   private pendingInputs: InputCmd[] = [];
@@ -237,6 +303,16 @@ export class OnlineProvider implements IWorldProvider {
     this.callbacks = callbacks;
 
     this.bindRoomHandlers(room);
+  }
+
+  private rebuildLocalVisionObstacles(): void {
+    this.visionObstacles = buildObstaclesFromProps(
+      this.props,
+      [],
+      [],
+      Array.from(this.authoritativeLootContainers.values()),
+      Array.from(this.authoritativeStructures.values())
+    );
   }
 
   static getWebSocketEndpoint(): string {
@@ -309,6 +385,30 @@ export class OnlineProvider implements IWorldProvider {
     this.sendWithOptionalLag('choose_upgrade', { upgradeId });
   }
 
+  switchWeaponSlot(slot: EquippedSlotId): void {
+    this.sendWithOptionalLag('switch_slot', { slot });
+  }
+
+  reloadWeapon(): void {
+    this.sendWithOptionalLag('reload_weapon', {});
+  }
+
+  interactLoot(): void {
+    this.sendWithOptionalLag('interact_loot', {});
+  }
+
+  buildStructure(kind: StructureKind): void {
+    this.sendWithOptionalLag('build_structure', { kind });
+  }
+
+  repairStructure(): void {
+    this.sendWithOptionalLag('repair_structure', {});
+  }
+
+  useMedkit(): void {
+    this.sendWithOptionalLag('use_medkit', {});
+  }
+
   async disconnect(): Promise<void> {
     this.manualDisconnect = true;
     if (this.pingTimerId !== null) {
@@ -349,6 +449,8 @@ export class OnlineProvider implements IWorldProvider {
       ? normalizeInputVector(aimInput.aimX, aimInput.aimY)
       : { x: 0, y: 0 };
 
+    let consumedOneShotActions = false;
+
     while (this.localAccumulatorMs >= tickMs) {
       this.localAccumulatorMs -= tickMs;
 
@@ -361,7 +463,14 @@ export class OnlineProvider implements IWorldProvider {
         aimX: normAim.x,
         aimY: normAim.y,
         firing: Boolean(aimInput?.firing),
+        switchSlot: !consumedOneShotActions ? aimInput?.switchSlot : undefined,
+        reload: !consumedOneShotActions ? aimInput?.reload : undefined,
+        interact: !consumedOneShotActions ? aimInput?.interact : undefined,
+        buildStructure: !consumedOneShotActions ? aimInput?.buildStructure : undefined,
+        repairStructure: !consumedOneShotActions ? aimInput?.repairStructure : undefined,
+        useMedkit: !consumedOneShotActions ? aimInput?.useMedkit : undefined,
       };
+      consumedOneShotActions = true;
 
       this.pendingInputs.push(cmd);
       if (this.pendingInputs.length > BALANCE.SIMULATION.MAX_PENDING_INPUTS) {
@@ -382,7 +491,8 @@ export class OnlineProvider implements IWorldProvider {
           BALANCE.SIMULATION.TICK_DT_SEC,
           this.currPredictedLocal.radius,
           this.mapWidth,
-          this.mapHeight
+          this.mapHeight,
+          this.visionObstacles
         );
         this.currPredictedLocal.x = stepped.x;
         this.currPredictedLocal.y = stepped.y;
@@ -390,7 +500,6 @@ export class OnlineProvider implements IWorldProvider {
         this.currPredictedLocal.vy = stepped.vy;
         this.currPredictedLocal.aimMode = cmd.aimMode;
         if (
-          cmd.aimMode === 'manual' &&
           cmd.aimX !== undefined &&
           cmd.aimY !== undefined &&
           (cmd.aimX !== 0 || cmd.aimY !== 0)
@@ -458,6 +567,9 @@ export class OnlineProvider implements IWorldProvider {
       players,
       zombies: interpolatedRemote.zombies,
       props: this.props,
+      lootItems: Array.from(this.authoritativeLootItems.values()),
+      lootContainers: Array.from(this.authoritativeLootContainers.values()),
+      structures: Array.from(this.authoritativeStructures.values()),
       roundsState: this.gameMode === 'rounds' ? { ...this.roundsState } : undefined,
       explorationState:
         this.gameMode === 'exploration' ? { ...this.explorationState } : undefined,
@@ -581,6 +693,76 @@ export class OnlineProvider implements IWorldProvider {
         this.recordSnapshotBufferEntry();
       });
     });
+
+    if (room.state.lootItems) {
+      $(room.state).lootItems.onAdd((item) => {
+        const syncLoot = () => {
+          const snap = this.extractLootItemSnapshot(item);
+          this.runWithOptionalInboundLag(() => {
+            this.authoritativeLootItems.set(snap.id, snap);
+          });
+        };
+        syncLoot();
+        $(item).onChange(() => {
+          syncLoot();
+        });
+      });
+
+      $(room.state).lootItems.onRemove((item) => {
+        const lId = item.id;
+        this.runWithOptionalInboundLag(() => {
+          this.authoritativeLootItems.delete(lId);
+        });
+      });
+    }
+
+    if (room.state.lootContainers) {
+      $(room.state).lootContainers.onAdd((container) => {
+        const syncContainer = () => {
+          const snap = this.extractLootContainerSnapshot(container);
+          this.runWithOptionalInboundLag(() => {
+            this.authoritativeLootContainers.set(snap.id, snap);
+            this.rebuildLocalVisionObstacles();
+          });
+        };
+        syncContainer();
+        $(container).onChange(() => {
+          syncContainer();
+        });
+      });
+
+      $(room.state).lootContainers.onRemove((container) => {
+        const cId = container.id;
+        this.runWithOptionalInboundLag(() => {
+          this.authoritativeLootContainers.delete(cId);
+          this.rebuildLocalVisionObstacles();
+        });
+      });
+    }
+
+    if (room.state.structures) {
+      $(room.state).structures.onAdd((structure) => {
+        const syncStructure = () => {
+          const snap = this.extractStructureSnapshot(structure);
+          this.runWithOptionalInboundLag(() => {
+            this.authoritativeStructures.set(snap.id, snap);
+            this.rebuildLocalVisionObstacles();
+          });
+        };
+        syncStructure();
+        $(structure).onChange(() => {
+          syncStructure();
+        });
+      });
+
+      $(room.state).structures.onRemove((structure) => {
+        const sId = structure.id;
+        this.runWithOptionalInboundLag(() => {
+          this.authoritativeStructures.delete(sId);
+          this.rebuildLocalVisionObstacles();
+        });
+      });
+    }
 
     room.onMessage('events', (events: GameEvent[]) => {
       if (!Array.isArray(events)) {
@@ -763,6 +945,7 @@ export class OnlineProvider implements IWorldProvider {
     if (s.seed && s.seed !== prevSeed) {
       this.seed = s.seed;
       this.props = generateMapProps(s.seed);
+      this.rebuildLocalVisionObstacles();
     }
 
     const serverClockMs = s.tick * BALANCE.SIMULATION.TICK_DT_MS;
@@ -790,7 +973,8 @@ export class OnlineProvider implements IWorldProvider {
         snap,
         this.pendingInputs,
         this.mapWidth,
-        this.mapHeight
+        this.mapHeight,
+        this.visionObstacles
       );
       this.pendingInputs = remainingInputs;
 
@@ -839,6 +1023,32 @@ export class OnlineProvider implements IWorldProvider {
     p: RemotePlayerSchemaView,
     sessionId: string
   ): PlayerStateSnapshot {
+    const activeSlot: EquippedSlotId =
+      p.activeSlot === 'slot1' || p.activeSlot === 'slot2' ? p.activeSlot : 'knife';
+    const activeWeaponId: WeaponId =
+      p.activeWeaponId === 'bat' ||
+      p.activeWeaponId === 'pistol' ||
+      p.activeWeaponId === 'shotgun' ||
+      p.activeWeaponId === 'smg' ||
+      p.activeWeaponId === 'rifle'
+        ? p.activeWeaponId
+        : 'knife';
+    const parseSlotWeapon = (val?: string): WeaponId | '' =>
+      val === 'bat' ||
+      val === 'pistol' ||
+      val === 'shotgun' ||
+      val === 'smg' ||
+      val === 'rifle' ||
+      val === 'knife'
+        ? val
+        : '';
+    const meleePhase: MeleeAttackPhase =
+      p.meleePhase === 'windup' ||
+      p.meleePhase === 'active' ||
+      p.meleePhase === 'recovery'
+        ? p.meleePhase
+        : 'idle';
+
     return {
       id: p.id || sessionId,
       colorIndex: p.colorIndex ?? 0,
@@ -867,6 +1077,21 @@ export class OnlineProvider implements IWorldProvider {
       readyForNextRound: Boolean(p.readyForNextRound),
       damageDealt: p.damageDealt ?? 0,
       revivesCount: p.revivesCount ?? 0,
+      activeSlot,
+      activeWeaponId,
+      slot1WeaponId: parseSlotWeapon(p.slot1WeaponId),
+      slot2WeaponId: parseSlotWeapon(p.slot2WeaponId),
+      slot1MagAmmo: p.slot1MagAmmo ?? 0,
+      slot2MagAmmo: p.slot2MagAmmo ?? 0,
+      ammoLight: p.ammoLight ?? 0,
+      ammoShells: p.ammoShells ?? 0,
+      ammoHeavy: p.ammoHeavy ?? 0,
+      reloadRemainingMs: p.reloadRemainingMs ?? 0,
+      reloadTotalMs: p.reloadTotalMs ?? 0,
+      meleePhase,
+      wood: p.wood ?? BALANCE.SURVIVAL.STARTING_WOOD,
+      scrap: p.scrap ?? BALANCE.SURVIVAL.STARTING_SCRAP,
+      medkits: p.medkits ?? BALANCE.SURVIVAL.STARTING_MEDKITS,
     };
   }
 
@@ -885,6 +1110,75 @@ export class OnlineProvider implements IWorldProvider {
       hp: z.hp,
       maxHp: z.maxHp,
       isElite: Boolean(z.isElite),
+    };
+  }
+
+  private extractLootItemSnapshot(
+    item: RemoteLootItemSchemaView
+  ): WorldLootItemSnapshot {
+    const kind = item.kind === 'ammo' ? 'ammo' : 'weapon';
+    const weaponId: WeaponId | undefined =
+      item.weaponId === 'bat' ||
+      item.weaponId === 'pistol' ||
+      item.weaponId === 'shotgun' ||
+      item.weaponId === 'smg' ||
+      item.weaponId === 'rifle' ||
+      item.weaponId === 'knife'
+        ? item.weaponId
+        : undefined;
+    const ammoType: Exclude<AmmoType, 'none'> | undefined =
+      item.ammoType === 'light' ||
+      item.ammoType === 'shells' ||
+      item.ammoType === 'heavy'
+        ? item.ammoType
+        : undefined;
+
+    return {
+      id: item.id,
+      kind,
+      x: item.x,
+      y: item.y,
+      weaponId,
+      magAmmo: item.magAmmo || undefined,
+      ammoType,
+      ammoAmount: item.ammoAmount || undefined,
+      label: item.label || '',
+    };
+  }
+
+  private extractLootContainerSnapshot(
+    c: RemoteLootContainerSchemaView
+  ): LootContainerSnapshot {
+    const kind: LootContainerKind =
+      c.kind === 'weapon_case' || c.kind === 'ammo_box' ? c.kind : 'supply_crate';
+    return {
+      id: c.id,
+      kind,
+      x: c.x,
+      y: c.y,
+      opened: Boolean(c.opened),
+      label: c.label || 'Recipiente',
+    };
+  }
+
+  private extractStructureSnapshot(
+    s: RemoteStructureSchemaView
+  ): BuildableStructureSnapshot {
+    const kind: StructureKind =
+      s.kind === 'scrap_barricade' || s.kind === 'spike_trap'
+        ? s.kind
+        : 'wood_barricade';
+    return {
+      id: s.id,
+      kind,
+      x: s.x,
+      y: s.y,
+      rotation: 0,
+      radius: s.radius || 20,
+      hp: s.hp,
+      maxHp: s.maxHp || 180,
+      ownerId: s.ownerId || '',
+      label: s.label || 'Estrutura',
     };
   }
 

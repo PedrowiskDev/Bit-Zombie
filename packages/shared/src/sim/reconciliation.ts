@@ -5,6 +5,7 @@ import type {
   PlayerStateSnapshot,
   ZombieStateSnapshot,
 } from '../types/protocol.js';
+import type { VisionObstacles } from './vision.js';
 
 /**
  * Valida código de convite de 5 caracteres (apenas caracteres de ROOM_CODE_ALPHABET, sem O, 0, I, 1).
@@ -117,6 +118,32 @@ export class PlayerInputQueue {
     if (typeof candidate.firing === 'boolean') {
       sanitized.firing = candidate.firing;
     }
+    if (
+      candidate.switchSlot === 'knife' ||
+      candidate.switchSlot === 'slot1' ||
+      candidate.switchSlot === 'slot2'
+    ) {
+      sanitized.switchSlot = candidate.switchSlot;
+    }
+    if (typeof candidate.reload === 'boolean') {
+      sanitized.reload = candidate.reload;
+    }
+    if (typeof candidate.interact === 'boolean') {
+      sanitized.interact = candidate.interact;
+    }
+    if (
+      candidate.buildStructure === 'wood_barricade' ||
+      candidate.buildStructure === 'scrap_barricade' ||
+      candidate.buildStructure === 'spike_trap'
+    ) {
+      sanitized.buildStructure = candidate.buildStructure;
+    }
+    if (typeof candidate.repairStructure === 'boolean') {
+      sanitized.repairStructure = candidate.repairStructure;
+    }
+    if (typeof candidate.useMedkit === 'boolean') {
+      sanitized.useMedkit = candidate.useMedkit;
+    }
 
     this.queue.push(sanitized);
     this.queue.sort((a, b) => a.seq - b.seq);
@@ -164,7 +191,8 @@ export function reconcileLocalPlayer(
   authoritative: PlayerStateSnapshot,
   pendingInputs: readonly InputCmd[],
   mapWidth: number = BALANCE.MAP.WIDTH,
-  mapHeight: number = BALANCE.MAP.HEIGHT
+  mapHeight: number = BALANCE.MAP.HEIGHT,
+  obstacles?: VisionObstacles
 ): { reconciledPlayer: PlayerStateSnapshot; remainingInputs: InputCmd[] } {
   const remainingInputs = pendingInputs.filter(
     (cmd) => cmd.seq > authoritative.lastProcessedSeq
@@ -194,14 +222,14 @@ export function reconcileLocalPlayer(
       BALANCE.SIMULATION.TICK_DT_SEC,
       authoritative.radius,
       mapWidth,
-      mapHeight
+      mapHeight,
+      obstacles
     );
     x = stepped.x;
     y = stepped.y;
     vx = stepped.vx;
     vy = stepped.vy;
     if (
-      cmd.aimMode === 'manual' &&
       cmd.aimX !== undefined &&
       cmd.aimY !== undefined &&
       (cmd.aimX !== 0 || cmd.aimY !== 0)

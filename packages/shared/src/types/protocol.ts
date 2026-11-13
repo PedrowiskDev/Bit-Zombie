@@ -22,6 +22,69 @@ export type ExplorationSubPhase =
 /** Modo de disparo escolhido pelo jogador: automático (mira no zumbi mais próximo) ou manual (lado direito / mira livre) */
 export type AimMode = 'auto' | 'manual';
 
+/** Identificadores de armas da Etapa 3 */
+export type WeaponId = 'knife' | 'bat' | 'pistol' | 'shotgun' | 'smg' | 'rifle';
+
+/** Categoria da arma */
+export type WeaponCategory = 'melee' | 'firearm';
+
+/** Tipos de munição claramente identificados */
+export type AmmoType = 'none' | 'light' | 'shells' | 'heavy';
+
+/** Espaços de armas equipadas (faca sempre acessível + 2 espaços de armas encontradas) */
+export type EquippedSlotId = 'knife' | 'slot1' | 'slot2';
+
+/** Fases do golpe corpo a corpo (preparação, impacto e recuperação) */
+export type MeleeAttackPhase = 'idle' | 'windup' | 'active' | 'recovery';
+
+/** Tipos de recursos de construção e fortificação (Etapa 4) */
+export type ResourceKind = 'wood' | 'scrap';
+
+/** Tipos de estruturas e fortificações construíveis pelo jogador (Etapa 4) */
+export type StructureKind = 'wood_barricade' | 'scrap_barricade' | 'spike_trap';
+
+export interface BuildableStructureSnapshot {
+  id: number;
+  kind: StructureKind;
+  x: number;
+  y: number;
+  rotation: number;
+  radius: number;
+  hp: number;
+  maxHp: number;
+  ownerId: string;
+  label: string;
+}
+
+/** Tipos de itens de loot no chão */
+export type WorldLootKind = 'weapon' | 'ammo' | 'resource' | 'medkit';
+
+export interface WorldLootItemSnapshot {
+  id: number;
+  kind: WorldLootKind;
+  x: number;
+  y: number;
+  weaponId?: WeaponId;
+  magAmmo?: number;
+  ammoType?: Exclude<AmmoType, 'none'>;
+  ammoAmount?: number;
+  resourceKind?: ResourceKind;
+  resourceAmount?: number;
+  label: string;
+}
+
+/** Tipos de recipientes pesquisáveis no mapa */
+export type LootContainerKind = 'weapon_case' | 'supply_crate' | 'ammo_box';
+
+export interface LootContainerSnapshot {
+  id: number;
+  kind: LootContainerKind;
+  x: number;
+  y: number;
+  opened: boolean;
+  label: string;
+}
+
 /** Tipo de bônus automático concedido ao subir de nível na Fase 1 */
 export type LevelUpBonusKind = 'damage' | 'fire_rate';
 
@@ -34,12 +97,18 @@ export type NetworkErrorCode =
   | 'CONNECTION_LOST';
 
 /**
- * Comando de intenção de movimento e mira enviado pelo cliente para um passo fixo de 50 ms.
+ * Comando de intenção de movimento, mira e ações de arma/loot/construção enviado pelo cliente para um passo fixo de 50 ms.
  * - `seq`: inteiro positivo monotônico crescente por jogador (1, 2, 3...).
  * - `dx`, `dy`: componentes do vetor de direção desejado; o servidor valida e limita a magnitude <= 1.
  * - `aimMode`: 'auto' (padrão) ou 'manual'.
  * - `aimX`, `aimY`: componentes do vetor de direção da mira manual (normalizado no servidor).
  * - `firing`: indica se o gatilho manual está pressionado neste passo.
+ * - `switchSlot`: solicita troca para `'knife' | 'slot1' | 'slot2'`.
+ * - `reload`: solicita recarga da arma de fogo equipada.
+ * - `interact`: solicita pegar item do chão ou abrir recipiente próximo.
+ * - `buildStructure`: solicita construir fortificação (`'wood_barricade' | 'scrap_barricade' | 'spike_trap'`).
+ * - `repairStructure`: solicita reparar a fortificação danificada mais próxima.
+ * - `useMedkit`: solicita usar Kit Médico para restaurar HP.
  */
 export interface InputCmd {
   seq: number;
@@ -49,12 +118,18 @@ export interface InputCmd {
   aimX?: number;
   aimY?: number;
   firing?: boolean;
+  switchSlot?: EquippedSlotId;
+  reload?: boolean;
+  interact?: boolean;
+  buildStructure?: StructureKind;
+  repairStructure?: boolean;
+  useMedkit?: boolean;
 }
 
 /** Mapa de comandos do tick indexado pelo `playerId` */
 export type TickInputMap = Record<string, InputCmd | undefined>;
 
-/** Tipos de props decorativos sem colisão espalhados pelo mapa */
+/** Tipos de props decorativos espalhados pelo mapa */
 export type PropKind = 'car' | 'crate' | 'bush' | 'rubble';
 
 export interface PropData {
@@ -85,6 +160,8 @@ export interface ZombieStateSnapshot {
   isElite?: boolean;
   /** Origem do spawn para rastreamento dos diretores ('round' | 'ambient' | 'horde' | 'manual') */
   spawnSource?: 'round' | 'ambient' | 'horde' | 'manual';
+  /** Multiplicador de velocidade individual (ex.: zumbis iniciais lentos perto da área inicial) */
+  speedMultiplier?: number;
 }
 
 export interface PlayerStateSnapshot {
@@ -127,6 +204,36 @@ export interface PlayerStateSnapshot {
   damageDealt?: number;
   /** Quantidade de resgates realizados por este jogador na partida */
   revivesCount?: number;
+  /** Espaço de arma atualmente ativo ('knife' | 'slot1' | 'slot2') */
+  activeSlot?: EquippedSlotId;
+  /** Identificador da arma atualmente em mãos */
+  activeWeaponId?: WeaponId;
+  /** Arma equipada no espaço 1 (ou '' se vazio) */
+  slot1WeaponId?: WeaponId | '';
+  /** Munição no carregador do espaço 1 */
+  slot1MagAmmo?: number;
+  /** Arma equipada no espaço 2 (ou '' se vazio) */
+  slot2WeaponId?: WeaponId | '';
+  /** Munição no carregador do espaço 2 */
+  slot2MagAmmo?: number;
+  /** Reserva de munição leve (Pistola / Submetralhadora) */
+  ammoLight?: number;
+  /** Reserva de cartuchos (Escopeta) */
+  ammoShells?: number;
+  /** Reserva de munição pesada (Rifle) */
+  ammoHeavy?: number;
+  /** Tempo restante de recarga em ms (0 se não estiver recarregando) */
+  reloadRemainingMs?: number;
+  /** Duração total da recarga em andamento em ms */
+  reloadTotalMs?: number;
+  /** Fase atual do golpe corpo a corpo ('idle' | 'windup' | 'active' | 'recovery') */
+  meleePhase?: MeleeAttackPhase;
+  /** Quantidade de Madeira disponível para construção e reparo (Etapa 4) */
+  wood?: number;
+  /** Quantidade de Sucata disponível para fortificações e armadilhas (Etapa 4) */
+  scrap?: number;
+  /** Quantidade de Kits Médicos disponíveis para cura rápida (Etapa 4) */
+  medkits?: number;
 }
 
 /** Estado detalhado do Diretor de Rodadas (Modo 1 — Sobrevivência por Rodadas) */
@@ -190,6 +297,9 @@ export interface WorldSnapshot {
   players: PlayerStateSnapshot[];
   zombies: ZombieStateSnapshot[];
   props: PropData[];
+  lootItems?: WorldLootItemSnapshot[];
+  lootContainers?: LootContainerSnapshot[];
+  structures?: BuildableStructureSnapshot[];
 }
 
 /**
@@ -213,6 +323,7 @@ export interface WeaponFireEvent extends BaseGameEvent {
   type: 'fire';
   projectileId: number;
   ownerId: string;
+  weaponId?: WeaponId;
   targetZombieId: number;
   fromX: number;
   fromY: number;
@@ -222,10 +333,82 @@ export interface WeaponFireEvent extends BaseGameEvent {
   range: number;
 }
 
+export interface MeleeSwingEvent extends BaseGameEvent {
+  type: 'melee_swing';
+  ownerId: string;
+  weaponId: WeaponId;
+  x: number;
+  y: number;
+  angle: number;
+  arcDeg: number;
+  rangePx: number;
+}
+
+export interface WeaponNoiseEvent extends BaseGameEvent {
+  type: 'weapon_noise';
+  ownerId: string;
+  weaponId: WeaponId;
+  x: number;
+  y: number;
+  radiusPx: number;
+}
+
+export interface LootPickedEvent extends BaseGameEvent {
+  type: 'loot_picked';
+  playerId: string;
+  lootId: number;
+  kind: WorldLootKind | 'container';
+  label: string;
+  x: number;
+  y: number;
+}
+
+export interface StructureBuiltEvent extends BaseGameEvent {
+  type: 'structure_built';
+  playerId: string;
+  structureId: number;
+  kind: StructureKind;
+  label: string;
+  x: number;
+  y: number;
+}
+
+export interface StructureDamagedEvent extends BaseGameEvent {
+  type: 'structure_damaged';
+  structureId: number;
+  kind: StructureKind;
+  x: number;
+  y: number;
+  damage: number;
+  hpRemaining: number;
+  destroyed: boolean;
+}
+
+export interface StructureRepairedEvent extends BaseGameEvent {
+  type: 'structure_repaired';
+  playerId: string;
+  structureId: number;
+  kind: StructureKind;
+  x: number;
+  y: number;
+  hpRestored: number;
+  hpCurrent: number;
+}
+
+export interface PlayerHealedEvent extends BaseGameEvent {
+  type: 'player_healed';
+  playerId: string;
+  hpRestored: number;
+  hpCurrent: number;
+  x: number;
+  y: number;
+}
+
 export interface ProjectileHitEvent extends BaseGameEvent {
   type: 'hit';
   projectileId: number;
   ownerId: string;
+  weaponId?: WeaponId;
   zombieId: number;
   zombieKind: ZombieKind;
   x: number;
@@ -303,6 +486,13 @@ export interface HordeClearedEvent extends BaseGameEvent {
 export type GameEvent =
   | PlayerSpawnedEvent
   | WeaponFireEvent
+  | MeleeSwingEvent
+  | WeaponNoiseEvent
+  | LootPickedEvent
+  | StructureBuiltEvent
+  | StructureDamagedEvent
+  | StructureRepairedEvent
+  | PlayerHealedEvent
   | ProjectileHitEvent
   | PlayerDamagedEvent
   | LevelUpEvent
