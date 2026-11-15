@@ -35,6 +35,7 @@ export interface SegmentObstacle {
   blocksVision: boolean;
   blocksProjectiles: boolean;
   blocksMovement?: boolean;
+  doorId?: number;
 }
 
 /**
@@ -109,10 +110,11 @@ export function buildObstaclesFromProps(
   containers: readonly Pick<LootContainerSnapshot, 'x' | 'y' | 'kind'>[] = [],
   structures: readonly Pick<
     BuildableStructureSnapshot,
-    'x' | 'y' | 'radius' | 'kind' | 'hp'
+    'x' | 'y' | 'radius' | 'kind' | 'hp' | 'open' | 'id' | 'rotation'
   >[] = []
 ): VisionObstacles {
   const circles: CircleObstacle[] = [...extraCircles];
+  const segments = [...extraSegments];
 
   for (let i = 0; i < props.length; i += 1) {
     const p = props[i];
@@ -166,7 +168,21 @@ export function buildObstaclesFromProps(
 
   for (let i = 0; i < structures.length; i += 1) {
     const s = structures[i];
-    if (s.hp <= 0 || s.kind === 'spike_trap') {
+    if (s.hp <= 0 || s.kind === 'spike_trap' || s.kind === 'slow_trap' || s.kind === 'shelter_marker') {
+      continue;
+    }
+    if (s.kind === 'map_door' || s.kind === 'shelter_door') {
+      if (!s.open) segments.push({
+        x1: s.x - s.radius, x2: s.x + s.radius, y1: s.y, y2: s.y,
+        blocksVision: true, blocksProjectiles: true, blocksMovement: true, doorId: s.id,
+      });
+      continue;
+    }
+    if (s.kind === 'shelter_wall') {
+      const dx = Math.sin(s.rotation) * s.radius;
+      const dy = Math.cos(s.rotation) * s.radius;
+      segments.push({ x1: s.x - dx, y1: s.y - dy, x2: s.x + dx, y2: s.y + dy,
+        blocksVision: true, blocksProjectiles: true, blocksMovement: true });
       continue;
     }
     circles.push({
@@ -182,7 +198,7 @@ export function buildObstaclesFromProps(
 
   return {
     circles,
-    segments: extraSegments,
+    segments,
   };
 }
 
@@ -445,7 +461,7 @@ export function findProjectileObstacleHit(
   toX: number,
   toY: number,
   obstacles: VisionObstacles
-): { tRatio: number; x: number; y: number } | null {
+): { tRatio: number; x: number; y: number; doorId?: number } | null {
   const dx = toX - fromX;
   const dy = toY - fromY;
   const dist = Math.hypot(dx, dy);
@@ -456,6 +472,7 @@ export function findProjectileObstacleHit(
   const ux = dx / dist;
   const uy = dy / dist;
   let bestDist = Number.POSITIVE_INFINITY;
+  let doorId: number | undefined;
 
   const segments = obstacles.segments;
   for (let i = 0; i < segments.length; i += 1) {
@@ -476,6 +493,7 @@ export function findProjectileObstacleHit(
     );
     if (hitDist !== null && hitDist < bestDist) {
       bestDist = hitDist;
+      doorId = seg.doorId;
     }
   }
 
@@ -497,6 +515,7 @@ export function findProjectileObstacleHit(
     );
     if (hitDist !== null && hitDist < bestDist) {
       bestDist = hitDist;
+      doorId = undefined;
     }
   }
 
@@ -506,6 +525,7 @@ export function findProjectileObstacleHit(
 
   return {
     tRatio: bestDist / dist,
+    doorId,
     x: fromX + ux * bestDist,
     y: fromY + uy * bestDist,
   };

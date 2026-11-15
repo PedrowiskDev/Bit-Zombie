@@ -44,6 +44,7 @@ export {
   type PropData,
   type PropKind,
   type ResourceKind,
+  type SupplyKind,
   type RoomPhase,
   type RoundCompletedEvent,
   type RoundStartedEvent,
@@ -92,6 +93,8 @@ export {
   type QueuedRoundZombie,
   type RoundsDirectorCallbacks,
 } from './sim/directors/RoundsDirector.js';
+export { SUPPLY_SLOTS } from './sim/supplies.js';
+export { generateUrbanMap, type UrbanMap, type HouseLayout } from './sim/urbanMap.js';
 export { generateMapProps } from './sim/propsGenerator.js';
 export {
   PlayerInputQueue,
@@ -181,7 +184,7 @@ export {
   getStructureDefinition,
   isValidStructureKind,
   stepStructuresAndZombieInteractions,
-  type StepStructuresContext,
+  type StepStructuresCallbacks,
   type StructureDefinition,
 } from './sim/structures.js';
 export { Simulation, type SimulationOptions } from './sim/Simulation.js';

@@ -56,9 +56,10 @@ export class VirtualJoystick {
   private hasRightAimed = false;
 
   // Estado do Mouse (PC) e Botão de Ataque Dedicado (Mobile/HUD)
-  private mouseLogicalPos: Vec2 | null = null;
+  private mouseClientPos: Vec2 | null = null;
   private mouseAttackHeld = false;
   private attackButtonHeld = false;
+  private attackTapUntil = 0;
 
   private readonly onPointerDownBound: (ev: PointerEvent) => void;
   private readonly onPointerMoveBound: (ev: PointerEvent) => void;
@@ -69,7 +70,8 @@ export class VirtualJoystick {
   constructor(
     targetElement: HTMLElement,
     logicalWidth = 960,
-    logicalHeight = 540
+    logicalHeight = 540,
+    private readonly canvas?: HTMLCanvasElement
   ) {
     this.targetElement = targetElement;
     this.targetElement.style.touchAction = 'none';
@@ -160,16 +162,18 @@ export class VirtualJoystick {
     };
   }
 
-  getMouseLogicalPosition(): Vec2 | null {
-    return this.mouseLogicalPos;
+  getMouseClientPosition(): Vec2 | null {
+    return this.mouseClientPos;
   }
 
   isAttackHeld(): boolean {
-    return this.attackButtonHeld || this.mouseAttackHeld;
+    return this.attackButtonHeld || this.mouseAttackHeld || performance.now() < this.attackTapUntil;
   }
 
-  setAttackButtonHeld(held: boolean): void {
+  setAttackButtonHeld(held: boolean, cancelled = false): void {
     this.attackButtonHeld = held;
+    if (held) this.attackTapUntil = performance.now() + 60;
+    else if (cancelled) this.attackTapUntil = 0;
   }
 
   /**
@@ -180,7 +184,7 @@ export class VirtualJoystick {
     if (norm.x !== 0 || norm.y !== 0) {
       this.rightAimVector = norm;
       this.hasRightAimed = true;
-      this.mouseLogicalPos = null;
+      this.mouseClientPos = null;
     }
   }
 
@@ -189,6 +193,7 @@ export class VirtualJoystick {
     this.resetRight();
     this.mouseAttackHeld = false;
     this.attackButtonHeld = false;
+    this.attackTapUntil = 0;
   }
 
   private defaultRestCoords(): {
@@ -265,7 +270,7 @@ export class VirtualJoystick {
 
     // No PC (mouse): clique esquerdo executa o ataque e atualiza a posição da mira
     if (ev.pointerType === 'mouse') {
-      this.mouseLogicalPos = pos;
+      this.mouseClientPos = { x: ev.clientX, y: ev.clientY };
       if (ev.button === 0) {
         this.mouseAttackHeld = true;
       }
@@ -293,7 +298,7 @@ export class VirtualJoystick {
       return;
     }
     ev.preventDefault();
-    this.mouseLogicalPos = null;
+    this.mouseClientPos = null;
     this.rightPointerId = ev.pointerId;
     this.rightBaseX = pos.x;
     this.rightBaseY = pos.y;
@@ -304,10 +309,7 @@ export class VirtualJoystick {
 
   private handlePointerMove(ev: PointerEvent): void {
     if (ev.pointerType === 'mouse' && this.leftPointerId === null && this.rightPointerId === null) {
-      const pos = this.clientToLogical(ev.clientX, ev.clientY);
-      if (pos) {
-        this.mouseLogicalPos = pos;
-      }
+      this.mouseClientPos = { x: ev.clientX, y: ev.clientY };
       return;
     }
 
@@ -392,7 +394,7 @@ export class VirtualJoystick {
   }
 
   private clientToLogical(clientX: number, clientY: number): Vec2 | null {
-    const canvas = this.targetElement.querySelector('canvas') ?? this.targetElement;
+    const canvas = this.canvas ?? this.targetElement;
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
       return null;

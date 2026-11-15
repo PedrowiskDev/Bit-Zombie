@@ -24,6 +24,7 @@ export class EndGameModal {
   private readonly container: HTMLDivElement;
   private readonly modeBadgeEl: HTMLDivElement;
   private readonly statsGridEl: HTMLDivElement;
+  private readonly historyList: HTMLOListElement;
   private readonly playAgainBtn: HTMLButtonElement;
   private readonly onKeyDownBound: (ev: KeyboardEvent) => void;
   private visible = false;
@@ -48,6 +49,7 @@ export class EndGameModal {
     });
 
     const card = document.createElement('div');
+    card.className = 'interface-card results-card';
     Object.assign(card.style, {
       width: 'min(92vw, 440px)',
       backgroundColor: '#121814',
@@ -120,7 +122,13 @@ export class EndGameModal {
       this.triggerRestart();
     });
 
-    card.append(title, this.modeBadgeEl, subtitle, this.statsGridEl, this.playAgainBtn);
+    const history = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Histórico neste dispositivo';
+    this.historyList = document.createElement('ol');
+    Object.assign(this.historyList.style, { maxHeight: '110px', overflowY: 'auto' });
+    history.append(summary, this.historyList);
+    card.append(title, this.modeBadgeEl, subtitle, this.statsGridEl, history, this.playAgainBtn);
     this.container.appendChild(card);
     document.body.appendChild(this.container);
 
@@ -136,11 +144,32 @@ export class EndGameModal {
     window.addEventListener('keydown', this.onKeyDownBound);
   }
 
+  private recordHistory(stats: EndGameStats): void {
+    const storageKey = 'bit-zombie-match-history';
+    const result = stats.gameMode === 'exploration'
+      ? `${stats.hordesCleared ?? 0} hordas` : `${stats.roundsCompleted ?? 0} rodadas`;
+    const summary = `${new Date().toLocaleDateString('pt-BR')} · ${result} · ${stats.kills} abates · ${Math.floor(stats.elapsedMs / 1000)}s`;
+    let recent = [summary];
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(storageKey) ?? '[]');
+      if (Array.isArray(saved)) recent.push(...saved.filter((entry): entry is string => typeof entry === 'string').slice(0, 19));
+      localStorage.setItem(storageKey, JSON.stringify(recent));
+    } catch {
+      // A exibição do resultado continua disponível quando o armazenamento falha.
+    }
+    this.historyList.replaceChildren(...recent.map((entry) => {
+      const item = document.createElement('li');
+      item.textContent = entry;
+      return item;
+    }));
+  }
+
   show(stats: EndGameStats): void {
     if (this.visible) {
       return;
     }
     this.visible = true;
+    this.recordHistory(stats);
     this.statsGridEl.innerHTML = '';
 
     if (stats.gameMode === 'exploration') {

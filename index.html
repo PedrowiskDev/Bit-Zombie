@@ -6,7 +6,8 @@
     <meta name="theme-color" content="#0c0f0d" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <title>Zombie Survival Coop</title>
+    <title>Bit-Zombie</title>
+    <link rel="stylesheet" href="/packages/client/src/ui/interface.css" />
     <meta name="description" content="Protótipo de sobrevivência zumbi cooperativo top-down 2D com Phaser 3, Colyseus e simulação determinística compartilhada." />
     <meta property="og:title" content="Zombie Survival Coop" />
     <meta property="og:description" content="Protótipo de sobrevivência zumbi cooperativo top-down 2D com Phaser 3, Colyseus e simulação determinística compartilhada." />
@@ -36,6 +37,67 @@
         user-select: none;
         -webkit-user-select: none;
         overscroll-behavior: none;
+      }
+      #fullscreen-toggle, .fullscreen-status {
+        position: fixed;
+        right: calc(8px + var(--safe-right));
+        z-index: 70;
+        border: 1px solid #577963;
+        border-radius: 8px;
+        background: #17261d;
+        color: #e4f1e7;
+        padding: 6px 10px;
+        font: 600 12px system-ui, sans-serif;
+      }
+      #fullscreen-toggle {
+        bottom: calc(8px + var(--safe-bottom));
+        min-height: 36px;
+        cursor: pointer;
+      }
+      .fullscreen-status {
+        bottom: calc(64px + var(--safe-bottom));
+        max-width: min(280px, 85vw);
+      }
+      @media (pointer: coarse) {
+        .mobile-quick-items:not([hidden]) {
+          padding-right: 120px;
+        }
+      }
+      .team-status {
+        color: #b8d6c1;
+        font: 600 11px system-ui, sans-serif;
+        overflow-wrap: anywhere;
+      }
+      @media (pointer: coarse) {
+        button, input, select, summary {
+          min-height: 48px !important;
+          min-width: 48px !important;
+        }
+        summary { display: list-item; align-content: center; }
+        .mobile-quick-items:not([hidden]) {
+          position: fixed;
+          display: flex;
+          justify-content: center;
+          flex-wrap: wrap;
+          gap: 4px;
+          left: calc(8px + var(--safe-left));
+          right: calc(8px + var(--safe-right));
+          bottom: calc(8px + var(--safe-bottom));
+          z-index: 30;
+          pointer-events: none;
+        }
+        .mobile-quick-items > button {
+          position: static !important;
+          pointer-events: auto;
+          max-width: 100%;
+        }
+        .mobile-graphics {
+          background: #203127;
+          color: #e6ece8;
+          border: 1px solid #577963;
+          border-radius: 6px;
+        }
+        [data-testid="hud-hint-bar"] { display: none !important; }
       }
       canvas {
         display: block;

@@ -132,14 +132,15 @@ export function stepZombiesMovementAndSeparation(
   mapWidth: number,
   mapHeight: number,
   grid: SpatialHashGrid<ZombieStateSnapshot>,
-  obstacles?: VisionObstacles
+  obstacles?: VisionObstacles,
+  chooseTarget?: (zombie: ZombieStateSnapshot, players: readonly PlayerStateSnapshot[]) => { x: number; y: number }
 ): void {
   const playerList = Array.from(players);
 
   // 1. Perseguição ao jogador vivo mais próximo
   for (let i = 0; i < zombies.length; i += 1) {
     const z = zombies[i];
-    const target = findClosestLivingPlayer(z.x, z.y, playerList);
+    const target = chooseTarget ? chooseTarget(z, playerList) : findClosestLivingPlayer(z.x, z.y, playerList);
     if (!target) {
       z.vx = 0;
       z.vy = 0;
@@ -390,8 +391,11 @@ export function stepAutoFireWeapons(
         const shotAngle = baseAngle + offsetIndex * spreadStepRad;
         const dirX = Math.cos(shotAngle);
         const dirY = Math.sin(shotAngle);
-        const fromX = player.x + dirX * muzzleOffset;
-        const fromY = player.y + dirY * muzzleOffset;
+        const muzzleX = player.x + dirX * muzzleOffset;
+        const muzzleY = player.y + dirY * muzzleOffset;
+        const muzzleBlocked = obstacles && findProjectileObstacleHit(player.x, player.y, muzzleX, muzzleY, obstacles);
+        const fromX = muzzleBlocked ? player.x : muzzleX;
+        const fromY = muzzleBlocked ? player.y : muzzleY;
         const projId = allocateProjectileId();
 
         projectiles.push({
@@ -549,8 +553,8 @@ function applyMeleeActiveArcHits(
       const pushDirX = dist > 1e-4 ? dx / dist : Math.cos(swing.angle);
       const pushDirY = dist > 1e-4 ? dy / dist : Math.sin(swing.angle);
       const pushed = resolveEntityObstacleCollisions(
-        z.x + pushDirX * swing.knockbackPx,
-        z.y + pushDirY * swing.knockbackPx,
+        z.x + pushDirX * swing.knockbackPx * (z.kind === 'brute' ? 0.45 : 1),
+        z.y + pushDirY * swing.knockbackPx * (z.kind === 'brute' ? 0.45 : 1),
         z.radius,
         obstacles,
         mapWidth,
@@ -787,8 +791,11 @@ export function stepPlayerWeaponsAndMelee(ctx: StepPlayerWeaponsContext): void {
         const shotAngle = baseAngle + offsetIndex * spreadStepRad;
         const dirX = Math.cos(shotAngle);
         const dirY = Math.sin(shotAngle);
-        const fromX = player.x + dirX * muzzleOffset;
-        const fromY = player.y + dirY * muzzleOffset;
+        const muzzleX = player.x + dirX * muzzleOffset;
+        const muzzleY = player.y + dirY * muzzleOffset;
+        const muzzleBlocked = obstacles && findProjectileObstacleHit(player.x, player.y, muzzleX, muzzleY, obstacles);
+        const fromX = muzzleBlocked ? player.x : muzzleX;
+        const fromY = muzzleBlocked ? player.y : muzzleY;
         const projId = allocateProjectileId();
 
         projectiles.push({
@@ -913,7 +920,8 @@ export function stepProjectilesAndHits(
   onZombieKilled: (zombie: ZombieStateSnapshot, killerId: string) => void,
   emitHit: (ev: Omit<ProjectileHitEvent, 'eventId' | 'tick'>) => void,
   onDamageDealt?: (damage: number, ownerId: string) => void,
-  obstacles?: VisionObstacles
+  obstacles?: VisionObstacles,
+  onDoorHit?: (id: number, damage: number) => void
 ): void {
   for (let i = projectiles.length - 1; i >= 0; i -= 1) {
     const proj = projectiles[i];
@@ -959,6 +967,7 @@ export function stepProjectilesAndHits(
 
     // Se bateu em uma parede ou obstáculo sólido antes de atingir o zumbi, o projétil é bloqueado
     if (obstacleHit && obstacleHit.tRatio < earliestT) {
+      if (obstacleHit.doorId !== undefined) onDoorHit?.(obstacleHit.doorId, proj.damage);
       projectiles.splice(i, 1);
       continue;
     }
@@ -970,19 +979,20 @@ export function stepProjectilesAndHits(
 
       // Aplica empurrão (knockback) do projétil se configurado (ex.: escopeta/rifle)
       if (!killed && proj.knockbackPx && proj.knockbackPx > 0) {
+        const push = proj.knockbackPx * (hitZombie.kind === 'brute' ? 0.45 : 1);
         const speed = Math.hypot(proj.vx, proj.vy) || 1;
         const pushed = obstacles
           ? resolveEntityObstacleCollisions(
-              hitZombie.x + (proj.vx / speed) * proj.knockbackPx,
-              hitZombie.y + (proj.vy / speed) * proj.knockbackPx,
+              hitZombie.x + (proj.vx / speed) * push,
+              hitZombie.y + (proj.vy / speed) * push,
               hitZombie.radius,
               obstacles,
               mapWidth,
               mapHeight
             )
           : clampPositionToArena(
-              hitZombie.x + (proj.vx / speed) * proj.knockbackPx,
-              hitZombie.y + (proj.vy / speed) * proj.knockbackPx,
+              hitZombie.x + (proj.vx / speed) * push,
+              hitZombie.y + (proj.vy / speed) * push,
               hitZombie.radius,
               mapWidth,
               mapHeight

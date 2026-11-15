@@ -2,6 +2,8 @@ import { BALANCE } from '../config/balance.js';
 import { SeededRng } from '../math/rng.js';
 import type { PropData, PropKind } from '../types/protocol.js';
 
+import { generateUrbanMap } from './urbanMap.js';
+
 const PROP_KINDS: readonly PropKind[] = ['car', 'crate', 'bush', 'rubble'];
 
 /**
@@ -11,6 +13,7 @@ const PROP_KINDS: readonly PropKind[] = ['car', 'crate', 'bush', 'rubble'];
 export function generateMapProps(seed: number): PropData[] {
   const rng = new SeededRng(seed ^ 0x9e3779b9);
   const props: PropData[] = [];
+  const { buildings } = generateUrbanMap(seed);
 
   const { WIDTH, HEIGHT, PROP_EDGE_MARGIN, PROP_COUNT, SPAWN_CLEAR_RADIUS, PROP_MIN_SPACING } =
     BALANCE.MAP;
@@ -33,6 +36,8 @@ export function generateMapProps(seed: number): PropData[] {
     if (dxCenter * dxCenter + dyCenter * dyCenter < clearRadiusSq) {
       continue;
     }
+
+    if (buildings.some((b) => Math.abs(x - b.x) < b.halfWidth + 85 && Math.abs(y - b.y) < b.halfHeight + 85)) continue;
 
     // Evita sobreposição visual exagerada entre props próximos
     let tooClose = false;

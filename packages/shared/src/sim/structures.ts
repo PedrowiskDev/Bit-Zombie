@@ -8,7 +8,7 @@ import type {
   ZombieStateSnapshot,
 } from '../types/protocol.js';
 import { getZombieStats } from './spawner.js';
-import type { VisionObstacles } from './vision.js';
+import { resolveEntityObstacleCollisions, type VisionObstacles } from './vision.js';
 
 export interface StructureDefinition {
   kind: StructureKind;
@@ -20,7 +20,20 @@ export interface StructureDefinition {
   blocksMovement: boolean;
 }
 
+const shelterDefinitions = [
+  { kind: 'shelter_marker', name: 'Marcador de Abrigo', woodCost: 0, scrapCost: 0, maxHp: 100, radiusPx: 13, blocksMovement: false },
+  { kind: 'shelter_wall', name: 'Parede', woodCost: 3, scrapCost: 1, maxHp: 240, radiusPx: 28, blocksMovement: true },
+  { kind: 'shelter_door', name: 'Porta de abrigo', woodCost: 2, scrapCost: 1, maxHp: 150, radiusPx: 28, blocksMovement: true },
+  { kind: 'slow_trap', name: 'Armadilha de lentidão', woodCost: 1, scrapCost: 1, maxHp: 80, radiusPx: 24, blocksMovement: false },
+  { kind: 'storage', name: 'Caixa compartilhada', woodCost: 3, scrapCost: 1, maxHp: 130, radiusPx: 18, blocksMovement: true },
+] as const;
+
 export const STRUCTURE_CATALOG: Readonly<Record<StructureKind, StructureDefinition>> = {
+  shelter_marker: shelterDefinitions[0],
+  shelter_wall: shelterDefinitions[1],
+  shelter_door: shelterDefinitions[2],
+  slow_trap: shelterDefinitions[3],
+  storage: shelterDefinitions[4],
   wood_barricade: {
     kind: 'wood_barricade',
     name: BALANCE.STRUCTURES.WOOD_BARRICADE.NAME,
@@ -54,14 +67,11 @@ export const ALL_STRUCTURE_KINDS: readonly StructureKind[] = [
   'wood_barricade',
   'scrap_barricade',
   'spike_trap',
+  ...shelterDefinitions.map((entry) => entry.kind),
 ];
 
 export function isValidStructureKind(raw: unknown): raw is StructureKind {
-  return (
-    raw === 'wood_barricade' ||
-    raw === 'scrap_barricade' ||
-    raw === 'spike_trap'
-  );
+  return ALL_STRUCTURE_KINDS.some((kind) => kind === raw);
 }
 
 export function getStructureDefinition(kind: StructureKind): StructureDefinition {
@@ -69,6 +79,7 @@ export function getStructureDefinition(kind: StructureKind): StructureDefinition
 }
 
 export interface InternalBuildableStructure extends BuildableStructureSnapshot {
+  kind: StructureKind;
   attackCooldownMs: number;
   trapTickCooldownMs: number;
 }
@@ -111,7 +122,7 @@ export function findValidStructurePlacement(
   }
 
   const def = getStructureDefinition(kind);
-  const offset = BALANCE.STRUCTURES.BUILD_OFFSET_PX;
+  const offset = Math.max(BALANCE.STRUCTURES.BUILD_OFFSET_PX, def.radiusPx + player.radius + 12);
   const rawX = player.x + Math.cos(player.facingAngle) * offset;
   const rawY = player.y + Math.sin(player.facingAngle) * offset;
   const clamped = clampPositionToArena(
@@ -153,6 +164,9 @@ export function findValidStructurePlacement(
       return null;
     }
   }
+
+  const resolved = resolveEntityObstacleCollisions(clamped.x, clamped.y, def.radiusPx + 4, obstacles, mapWidth, mapHeight);
+  if (Math.hypot(resolved.x - clamped.x, resolved.y - clamped.y) > 0.01) return null;
 
   return {
     x: Math.round(clamped.x),
@@ -207,7 +221,7 @@ export function stepStructuresAndZombieInteractions(
 
     const def = getStructureDefinition(struct.kind);
 
-    if (def.blocksMovement) {
+    if (def.blocksMovement && struct.kind !== 'shelter_door') {
       // Barricada sólida: zumbis encostados na borda física (raio + raioZumbi + 8 px) atacam a barricada
       if (struct.attackCooldownMs <= 0) {
         let totalZombieDamage = 0;
@@ -216,10 +230,16 @@ export function stepStructuresAndZombieInteractions(
           if (z.hp <= 0) {
             continue;
           }
-          const dist = Math.hypot(z.x - struct.x, z.y - struct.y);
-          if (dist <= struct.radius + z.radius + 8) {
+          const dx = z.x - struct.x;
+          const dy = z.y - struct.y;
+          const wall = struct.kind === 'shelter_wall';
+          const ux = Math.sin(struct.rotation);
+          const uy = Math.cos(struct.rotation);
+          const along = Math.max(-struct.radius, Math.min(struct.radius, dx * ux + dy * uy));
+          const dist = wall ? Math.hypot(dx - along * ux, dy - along * uy) : Math.hypot(dx, dy);
+          if (dist <= (wall ? 0 : struct.radius) + z.radius + 8) {
             const zStats = getZombieStats(z.kind, z.isElite);
-            totalZombieDamage += zStats.contactDamage;
+            totalZombieDamage += zStats.contactDamage * (z.kind === 'demolisher' ? 3 : 1);
           }
         }
 
@@ -244,7 +264,7 @@ export function stepStructuresAndZombieInteractions(
           }
         }
       }
-    } else if (struct.kind === 'spike_trap') {
+    } else if (struct.kind === 'spike_trap' || struct.kind === 'slow_trap') {
       // Armadilha de espinhos: aplica lentidão contínua e pulso de dano periódico aos zumbis sobre a armadilha
       const overlappingZombies: ZombieStateSnapshot[] = [];
       for (let zIdx = 0; zIdx < zombies.length; zIdx += 1) {
@@ -257,12 +277,12 @@ export function stepStructuresAndZombieInteractions(
           overlappingZombies.push(z);
           // Reduz o deslocamento do zumbi enquanto atravessa os estrepes
           const slow = BALANCE.STRUCTURES.SPIKE_TRAP.SLOW_MULTIPLIER;
-          z.x -= z.vx * 0.05 * (1 - slow);
-          z.y -= z.vy * 0.05 * (1 - slow);
+          z.x -= z.vx * dtMs / 1000 * (1 - slow);
+          z.y -= z.vy * dtMs / 1000 * (1 - slow);
         }
       }
 
-      if (overlappingZombies.length > 0 && struct.trapTickCooldownMs <= 0) {
+      if (struct.kind === 'spike_trap' && overlappingZombies.length > 0 && struct.trapTickCooldownMs <= 0) {
         struct.trapTickCooldownMs = BALANCE.STRUCTURES.SPIKE_TRAP.TICK_INTERVAL_MS;
         const dmg = BALANCE.STRUCTURES.SPIKE_TRAP.DAMAGE_PER_TICK;
         let wear = 0;

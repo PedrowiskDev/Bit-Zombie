@@ -13,7 +13,7 @@
     "packages/client"
   ],
   "scripts": {
-    "dev": "tsx packages/server/src/index.ts",
+    "dev": "tsx --conditions=development packages/server/src/index.ts",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run typecheck",

@@ -30,6 +30,7 @@ describe('Simulation — Etapa 3: Zumbis, Spawn, Colisões, Combate Automático,
     });
 
     const sim = new Simulation({ seed: 701, enableAutoSpawn: false });
+    sim.clearPropsForTesting();
     sim.addPlayer('p1', { x: 1000, y: 1000 });
     sim.addPlayer('p2', { x: 3000, y: 3000 });
 
@@ -42,12 +43,12 @@ describe('Simulation — Etapa 3: Zumbis, Spawn, Colisões, Combate Automático,
     expect(z.x).toBeCloseTo(2506, 4);
     expect(z.y).toBeCloseTo(3000, 4);
 
-    // Se p2 morrer, o zumbi passa a perseguir p1 (que está vivo em 1000, 1000)
+    // Ao perder p2, o zumbi investiga a última posição conhecida. P1 está fora do alcance.
     sim.setPlayerHp('p2', 0);
     const prevX = z.x;
     sim.step(tickMs);
     z = sim.getSnapshot().zombies[0];
-    expect(z.x).toBeLessThan(prevX);
+    expect(z.x).toBeGreaterThan(prevX);
 
     // Garante que múltiplos zumbis simultâneos (índices 0, 1, 2...) perseguem o jogador no mesmo tick (sem exaurir iterador)
     sim.spawnZombie('common', { x: 1600, y: 1000 });
@@ -63,7 +64,7 @@ describe('Simulation — Etapa 3: Zumbis, Spawn, Colisões, Combate Automático,
     for (const zm of afterMulti) {
       const prev = beforeMulti.find((b) => b.id === zm.id)!;
       const newDist = Math.hypot(zm.x - 1000, zm.y - 1000);
-      expect(newDist).toBeLessThan(prev.dist);
+      if (zm.id !== z.id) expect(newDist).toBeLessThan(prev.dist);
       expect(Math.hypot(zm.vx, zm.vy)).toBeGreaterThan(0);
     }
   });

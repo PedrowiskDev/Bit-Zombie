@@ -1,7 +1,19 @@
+import { drawLootContainer, drawLootItem } from '../render/LootArt.js';
+import { GameAudio } from '../audio/GameAudio.js';
+import { WorldRenderer3D } from '../render/WorldRenderer3D.js';
+import type { QualityMode } from '../render/GraphicsQuality.js';
+import { GroundProjection } from '../render/GroundProjection.js';
+import { IsometricView } from '../render/IsometricView.js';
+import { FrameProfiler } from '../render/FrameProfiler.js';
+import type { RenderWorldState } from '../network/WorldProvider.js';
 import Phaser from 'phaser';
 import {
   BALANCE,
   buildObstaclesFromProps,
+  SUPPLY_SLOTS,
+  getStructureDefinition,
+  hasLineOfSight,
+  generateUrbanMap,
   canAffordStructure,
   computeVisionPolygon,
   getAmmoLabel,
@@ -14,6 +26,7 @@ import {
   type EquippedSlotId,
   type GameMode,
   type LootContainerSnapshot,
+  type PlayerStateSnapshot,
   type PropData,
   type PropKind,
   type ResourceKind,
@@ -35,6 +48,7 @@ import { CombatEffectsManager } from '../ui/CombatEffects.js';
 import { DebugOverlay } from '../ui/DebugOverlay.js';
 import { EndGameModal, formatSurvivalTime } from '../ui/EndGameModal.js';
 import { LobbyOverlay } from '../ui/LobbyOverlay.js';
+import { Minimap } from '../ui/Minimap.js';
 import { UpgradePickerOverlay } from '../ui/UpgradePickerOverlay.js';
 
 const FOG_TEX_KEY = 'fog_of_war_canvas_tex';
@@ -70,7 +84,6 @@ export class GameScene extends Phaser.Scene {
 
   private readonly playerSprites = new Map<string, Phaser.GameObjects.Image>();
   private readonly playerRings = new Map<string, Phaser.GameObjects.Arc>();
-  private readonly playerRangeRings = new Map<string, Phaser.GameObjects.Arc>();
   private readonly zombieSprites = new Map<number, Phaser.GameObjects.Image>();
   private readonly zombieFlashTimers = new Map<number, number>();
   private readonly propEntries: Array<{
@@ -83,17 +96,45 @@ export class GameScene extends Phaser.Scene {
   private readonly exploredCellsGrid = new Uint8Array(FOG_GRID_COLS * FOG_GRID_ROWS);
   private exploredCellsCount = 0;
   private exploredCanvas!: HTMLCanvasElement;
+  private minimap!: Minimap;
   private exploredCtx!: CanvasRenderingContext2D;
   private fogTexture!: Phaser.Textures.CanvasTexture;
+  private world3D?: WorldRenderer3D;
+  private projection?: GroundProjection;
+  private readonly isometricView = new IsometricView();
+  private isometricProjection?: GroundProjection;
+  private presentationDeltaMs = 0;
+  private finalPresentation?: RenderWorldState;
+  private finalPresentationMs = 0;
+  private zoomButton!: HTMLButtonElement;
+  private pendingPresentation?: RenderWorldState;
+  private profiler?: FrameProfiler;
+  private ground!: Phaser.GameObjects.TileSprite;
+  private arenaGraphics!: Phaser.GameObjects.Graphics;
   private fogImage!: Phaser.GameObjects.Image;
-  private visionConeGraphics!: Phaser.GameObjects.Graphics;
+  private pauseButton!: HTMLButtonElement;
+  private pauseDialog!: HTMLDialogElement;
+  private offlinePaused = false;
+  private graphicsMode: QualityMode = 'auto';
+  private get batterySaver(): boolean {
+    return this.graphicsMode === 'economy';
+  }
+  private audio!: GameAudio;
+  private graphicsButton!: HTMLButtonElement;
+  private hudStack!: HTMLDivElement;
+  private utilityPanel!: HTMLDetailsElement;
+  private teamStatus!: HTMLDivElement;
+  private quickItems!: HTMLDivElement;
+  private nextDangerPingAt = 0;
+  private readonly touchControls = window.matchMedia('(pointer: coarse)');
+  private urbanMap = generateUrbanMap(BALANCE.SIMULATION.DEFAULT_SEED);
+  private readonly buildingLabels: Phaser.GameObjects.Text[] = [];
   private wallSegmentsGraphics!: Phaser.GameObjects.Graphics;
   private dangerPingGraphics!: Phaser.GameObjects.Graphics;
   private dangerPing: DangerPingMarker | null = null;
 
   private zombieHpGraphics!: Phaser.GameObjects.Graphics;
   private lootGraphics!: Phaser.GameObjects.Graphics;
-  private manualAimGraphics!: Phaser.GameObjects.Graphics;
   private reviveGraphics!: Phaser.GameObjects.Graphics;
   private propsGroup!: Phaser.GameObjects.Group;
   private cameraTargetId: string | null = null;
@@ -110,6 +151,17 @@ export class GameScene extends Phaser.Scene {
   private hudSlot2Btn!: HTMLButtonElement;
   private hudAmmoStatusEl!: HTMLDivElement;
   private hudSurvivalBarEl!: HTMLDivElement;
+  private shelterControls!: HTMLDivElement;
+  private readonly shelterButtons = new Map<StructureKind, HTMLButtonElement>();
+  private inventoryPanel!: HTMLDivElement;
+  private supplyRows: Array<{
+    quantity: HTMLSpanElement;
+    amount: HTMLInputElement;
+    drop: HTMLButtonElement;
+    share: HTMLButtonElement;
+    deposit: HTMLButtonElement;
+    withdraw: HTMLButtonElement;
+  }> = [];
   private hudResourcesStatusEl!: HTMLDivElement;
   private hudBuildWoodBtn!: HTMLButtonElement;
   private hudBuildTrapBtn!: HTMLButtonElement;
@@ -162,27 +214,41 @@ export class GameScene extends Phaser.Scene {
     if (params.get('aim') === 'manual') {
       this.localAimMode = 'manual';
     } else {
-      this.localAimMode = 'auto';
+      this.localAimMode = this.touchControls.matches ? 'manual' : 'auto';
     }
 
+    try {
+      const saved = localStorage.getItem('bit-zombie-graphics-mode');
+      this.graphicsMode = saved === 'standard' || saved === 'economy' || saved === 'auto' ? saved
+        : localStorage.getItem('bit-zombie-battery-saver') === 'true' ? 'economy' : 'auto';
+    } catch {
+      this.graphicsMode = 'auto';
+    }
     const debugEnabled = params.has('debug');
+    this.profiler = debugEnabled ? new FrameProfiler() : undefined;
+    this.projection = undefined;
+    this.isometricProjection = undefined;
+    this.isometricView.resetFollow();
+    this.pendingPresentation = undefined;
+    this.finalPresentation = undefined;
+    this.finalPresentationMs = 0;
 
     this.provider = new OfflineProvider(
       'player-1',
       this.defaultSeed,
-      this.selectedGameMode
+      this.selectedGameMode,
+      this.profiler?.recordStep
     );
     this.currentSeedRendered = -1;
     this.cameraTargetId = null;
     this.playerSprites.clear();
     this.playerRings.clear();
-    this.playerRangeRings.clear();
     this.zombieSprites.clear();
     this.zombieFlashTimers.clear();
     this.propEntries.length = 0;
     this.extraWallSegments.length = 0;
 
-    const state = this.provider.getRenderState();
+    const state = this.readRenderState();
     const { mapWidth, mapHeight } = state;
 
     // 1. Piso com ruído e manchas (4000x4000) usando textura supersampled 3x HiDPI
@@ -190,6 +256,22 @@ export class GameScene extends Phaser.Scene {
     ground.setOrigin(0, 0);
     ground.setTileScale(1 / TEXTURE_SCALE, 1 / TEXTURE_SCALE);
     ground.setDepth(0);
+    this.ground = ground;
+    this.world3D = undefined;
+    this.game.canvas.dataset.worldRenderer = 'phaser';
+    this.initFogOfWarLayers(mapWidth, mapHeight);
+    const parent = this.game.canvas.parentElement;
+    if (parent && params.get('renderer') !== '2d') {
+      try {
+        parent.style.position = 'relative';
+        this.game.canvas.style.position = 'relative';
+        this.game.canvas.style.zIndex = '1';
+        this.world3D = new WorldRenderer3D(parent, this.fogTexture.getCanvas(), () => this.syncWorldRender(0));
+        this.world3D.setQualityMode(this.graphicsMode);
+      } catch {
+        // Mantém o renderizador 2D quando WebGL2 não puder ser inicializado.
+      }
+    }
 
     // 2. Grade tática sutil e limites visíveis da arena (4000x4000)
     this.drawArenaBoundariesAndLandmarks(mapWidth, mapHeight);
@@ -200,14 +282,9 @@ export class GameScene extends Phaser.Scene {
     this.wallSegmentsGraphics.setDepth(6);
     this.renderPropsForSeed(state.seed, state.props);
 
-    // 4. Camada de Fog of War em 3 estados (Não Explorado / Explorado Fora da Visão / Visão Atual) + Cone de Visão (110°)
-    this.initFogOfWarLayers(mapWidth, mapHeight);
-
     // 5. Barra de vida dos zumbis, loot/recipientes, laser de mira manual, zona de resgate e efeitos de combate
     this.lootGraphics = this.add.graphics();
     this.lootGraphics.setDepth(7);
-    this.manualAimGraphics = this.add.graphics();
-    this.manualAimGraphics.setDepth(8);
     this.reviveGraphics = this.add.graphics();
     this.reviveGraphics.setDepth(8);
     this.dangerPingGraphics = this.add.graphics();
@@ -225,12 +302,41 @@ export class GameScene extends Phaser.Scene {
     this.joystick = new VirtualJoystick(
       mountEl,
       this.logicalWidth,
-      this.logicalHeight
+      this.logicalHeight,
+      this.game.canvas
     );
 
     // 8. Camada de HUD Nativa HiDPI, Botões Táticos, Seletor de Upgrades, Banner, Modal de Fim de Jogo e Lobby
     this.createHudOverlay();
+    this.minimap = new Minimap(this.hudStack);
     this.createHudDomControls();
+    this.createPauseControls();
+    this.createMobileHud();
+    this.audio = new GameAudio();
+    const sound = document.createElement('button');
+    sound.type = 'button';
+    sound.className = 'mobile-graphics';
+    const syncSoundLabel = () => {
+      sound.textContent = this.audio.isMuted ? 'Som desligado' : 'Som ligado';
+      sound.setAttribute('aria-pressed', String(!this.audio.isMuted));
+    };
+    syncSoundLabel();
+    sound.addEventListener('click', () => {
+      this.audio.toggle();
+      syncSoundLabel();
+    });
+    const controls = document.createElement('p');
+    controls.className = 'controls-summary';
+    controls.textContent = this.touchControls.matches
+      ? 'Joystick esquerdo: mover. Direito: mirar. Segure Atacar e arraste para ajustar a mira.'
+      : 'WASD: mover · Mouse: mirar · Clique: atacar · E: interagir · R: recarregar · M: modo de mira';
+    this.utilityPanel.append(sound, controls);
+    this.zoomButton = document.createElement('button');
+    this.zoomButton.type = 'button';
+    this.zoomButton.textContent = 'Zoom 100%';
+    this.zoomButton.hidden = !this.world3D?.available;
+    this.zoomButton.addEventListener('click', () => this.adjustZoom());
+    this.utilityPanel.append(this.zoomButton);
     this.upgradePicker = new UpgradePickerOverlay((upgradeId) => {
       this.provider.chooseUpgrade?.(upgradeId);
       this.processTransientEvents();
@@ -258,8 +364,14 @@ export class GameScene extends Phaser.Scene {
 
     // Ajusta orientação e resolução física HiDPI (devicePixelRatio) e escuta redimensionamento
     this.syncViewportOrientation();
-    this.onWindowResizeBound = () => this.syncViewportOrientation();
+    this.onWindowResizeBound = () => {
+      this.syncViewportOrientation();
+      this.world3D?.resetQualitySampling();
+      this.syncWorldRender(0);
+      this.profiler?.reset();
+    };
     window.addEventListener('resize', this.onWindowResizeBound);
+    this.game.canvas.addEventListener('wheel', this.onZoomWheel, { passive: false });
 
     // Se ?mode=offline ou ?autostart=1 estiver na URL, inicia direto no modo offline
     if (params.get('mode') === 'offline' || params.get('autostart') === '1') {
@@ -270,7 +382,12 @@ export class GameScene extends Phaser.Scene {
 
     // Atalhos de teclado: M alterna modo de tiro, N antecipa intervalo, Q sinaliza perigo, 1/2/3 troca arma, R recarrega, E coleta/abre
     this.onToggleKeyBound = (ev: KeyboardEvent) => {
-      if (this.lobbyOverlay.isVisible() || this.endGameModal.isVisible()) {
+      if (ev.code === 'Escape' && this.canPauseOffline() && !ev.repeat) {
+        ev.preventDefault();
+        this.setOfflinePaused(!this.offlinePaused);
+        return;
+      }
+      if (this.offlinePaused || this.lobbyOverlay.isVisible() || this.endGameModal.isVisible()) {
         return;
       }
       if (ev.code === 'KeyM') {
@@ -349,7 +466,7 @@ export class GameScene extends Phaser.Scene {
       this.joystick.setAttackButtonHeld(Boolean(held));
     };
     win.__spawnTestZombie = (
-      kind: 'common' | 'fast' | 'brute',
+      kind: ZombieKind,
       x: number,
       y: number
     ) => {
@@ -372,7 +489,7 @@ export class GameScene extends Phaser.Scene {
       if (this.provider instanceof OfflineProvider) {
         this.provider.addWallSegmentForTest(x1, y1, x2, y2);
       }
-      const curState = this.provider.getRenderState();
+      const curState = this.readRenderState();
       this.visionObstacles = buildObstaclesFromProps(
         curState.props,
         this.extraWallSegments
@@ -400,9 +517,11 @@ export class GameScene extends Phaser.Scene {
           { x: dx, y: dy },
           customAim ?? this.readAimInput({ x: dx, y: dy })
         );
-        this.processTransientEvents();
+        const state = this.readRenderState();
+        this.processTransientEvents(state);
+        const localPlayer = state.players.find((p) => p.id === state.localPlayerId);
         this.combatEffects.update(16, (px, py) =>
-          this.isWorldPointVisibleToLocalPlayer(px, py, 6)
+          this.isWorldPointVisibleToLocalPlayer(px, py, 6, localPlayer)
         );
       }
       this.syncWorldRender(16);
@@ -490,10 +609,22 @@ export class GameScene extends Phaser.Scene {
       }
     };
 
-    // 9. Renderiza o estado inicial imediatamente
+    const worldCamera = this.cameras.main;
+    worldCamera.on(Phaser.Cameras.Scene2D.Events.PRE_RENDER, this.applyGroundProjection, this);
+    this.game.events.on(Phaser.Core.Events.POST_RENDER, this.presentWorld, this);
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
+
+    // 9. Agenda a apresentação do estado inicial
     this.syncWorldRender(0);
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.game.events.off(Phaser.Core.Events.POST_RENDER, this.presentWorld, this);
+      worldCamera.off(Phaser.Cameras.Scene2D.Events.PRE_RENDER, this.applyGroundProjection, this);
+      this.game.canvas.removeEventListener('wheel', this.onZoomWheel);
+      document.removeEventListener('visibilitychange', this.onVisibilityChange);
+      this.pendingPresentation = undefined;
+      this.world3D?.dispose();
+      this.audio.dispose();
       window.removeEventListener('keydown', this.onToggleKeyBound);
       window.removeEventListener('resize', this.onWindowResizeBound);
       void this.provider.disconnect?.();
@@ -503,12 +634,16 @@ export class GameScene extends Phaser.Scene {
       this.endGameModal.destroy();
       this.lobbyOverlay.destroy();
       this.debugOverlay.destroy();
-      this.hudTopPanelEl.remove();
+      this.minimap.destroy();
+      this.hudStack.remove();
       this.hudWeaponBarEl.remove();
       this.hudSurvivalBarEl.remove();
       this.hudRepairBtn.remove();
       this.hudReloadBtn.remove();
       this.hudInteractBtn.remove();
+      this.pauseDialog.remove();
+      this.pauseButton.remove();
+      this.quickItems.remove();
       this.hudHintBarEl.remove();
       this.allyIndicatorEl.remove();
       this.joystickLayerEl.remove();
@@ -523,6 +658,20 @@ export class GameScene extends Phaser.Scene {
 
   update(_time: number, deltaMs: number): void {
     const isBlockedByUi = this.endGameModal.isVisible() || this.lobbyOverlay.isVisible();
+    if (this.offlinePaused || (this.provider.mode === 'offline' && isBlockedByUi)) {
+      this.profiler?.suspend();
+      this.world3D?.resetQualitySampling();
+      if (!this.offlinePaused && this.finalPresentation && this.finalPresentationMs > 0) {
+        this.presentationDeltaMs = Math.min(100, this.game.loop.rawDelta);
+        this.finalPresentationMs -= this.presentationDeltaMs;
+        this.pendingPresentation = this.finalPresentation;
+      }
+      return;
+    }
+    if (isBlockedByUi || document.hidden) this.profiler?.suspend();
+    else this.profiler?.begin();
+    if (isBlockedByUi || document.hidden) this.world3D?.resetQualitySampling();
+    else this.world3D?.sampleFrame(this.game.loop.rawDelta);
     const combinedInput = isBlockedByUi ? { x: 0, y: 0 } : this.readCombinedInput();
     const aimInput = isBlockedByUi
       ? {
@@ -533,14 +682,21 @@ export class GameScene extends Phaser.Scene {
         }
       : this.readAimInput(combinedInput);
 
-    this.provider.updateFrame(deltaMs, combinedInput, aimInput);
-    this.processTransientEvents();
+    if (this.profiler) {
+      this.profiler.measure('provider', () => this.provider.updateFrame(deltaMs, combinedInput, aimInput));
+    } else {
+      this.provider.updateFrame(deltaMs, combinedInput, aimInput);
+    }
+    const state = this.readRenderState();
+    if (!isBlockedByUi) this.audio.update(state);
+    this.processTransientEvents(state);
+    const localPlayer = state.players.find((p) => p.id === state.localPlayerId);
     this.combatEffects.update(deltaMs, (px, py) =>
-      this.isWorldPointVisibleToLocalPlayer(px, py, 6)
+      this.isWorldPointVisibleToLocalPlayer(px, py, 6, localPlayer)
     );
     this.updateLevelUpBanner(deltaMs);
     this.updateDangerPing(deltaMs);
-    this.syncWorldRender(deltaMs);
+    this.syncWorldRender(deltaMs, state, this.game.loop.rawDelta);
     this.drawJoystickOverlay();
   }
 
@@ -565,7 +721,7 @@ export class GameScene extends Phaser.Scene {
 
     // Calcula o multiplicador para que o framebuffer WebGL tenha no mínimo a resolução física da tela (DPR nativo)
     const rawDpr = Math.min(
-      BALANCE.VIEWPORT.MAX_DPR,
+      this.batterySaver ? 1 : BALANCE.VIEWPORT.MAX_DPR,
       Math.max(1, window.devicePixelRatio || 1)
     );
     const physicalW = Math.round(winW * rawDpr);
@@ -625,33 +781,28 @@ export class GameScene extends Phaser.Scene {
    *   toca/segura o botão dedicado de Ataque (`btn-attack`) ou pressiona `Espaço`/`F`.
    */
   private readAimInput(moveVector: Vec2): FrameAimInput {
-    const state = this.provider.getRenderState();
+    const state = this.readRenderState();
     const localPlayer = state.players.find((p) => p.id === state.localPlayerId);
     const rightStick = this.joystick.getRightAimState();
-    const mouseLogical = this.joystick.getMouseLogicalPosition();
+    const mouse = this.joystick.getMouseClientPosition();
     const firing = this.joystick.isAttackHeld() || this.keyboard.isAttackHeld();
 
     if (rightStick.active || rightStick.hasAimed) {
-      const norm = normalizeInputVector(rightStick.aimX, rightStick.aimY);
+      const stick = { x: rightStick.aimX, y: rightStick.aimY };
+      const norm = this.isometricProjection?.inputToGround(stick) ?? normalizeInputVector(stick.x, stick.y);
       if (norm.x !== 0 || norm.y !== 0) {
         this.lastAimVector = norm;
       }
-    } else if (mouseLogical && localPlayer) {
-      const cam = this.cameras.main;
-      const viewLeft =
-        cam.worldView && cam.worldView.width > 0
-          ? cam.worldView.x
-          : localPlayer.x - this.logicalWidth * 0.5;
-      const viewTop =
-        cam.worldView && cam.worldView.height > 0
-          ? cam.worldView.y
-          : localPlayer.y - this.logicalHeight * 0.5;
-      const worldX = viewLeft + mouseLogical.x;
-      const worldY = viewTop + mouseLogical.y;
-      const dx = worldX - localPlayer.x;
-      const dy = worldY - localPlayer.y;
-      if (Math.hypot(dx, dy) > 4) {
-        this.lastAimVector = normalizeInputVector(dx, dy);
+    } else if (mouse && localPlayer && this.projection) {
+      const rect = this.game.canvas.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0 && mouse.x >= rect.left && mouse.x <= rect.right &&
+          mouse.y >= rect.top && mouse.y <= rect.bottom) {
+        const point = this.projection.screenToGround(mouse, rect);
+        const dx = point.x - localPlayer.x;
+        const dy = point.y - localPlayer.y;
+        if (Math.hypot(dx, dy) > 4) {
+          this.lastAimVector = normalizeInputVector(dx, dy);
+        }
       }
     } else if (moveVector.x !== 0 || moveVector.y !== 0) {
       this.lastAimVector = normalizeInputVector(moveVector.x, moveVector.y);
@@ -665,6 +816,105 @@ export class GameScene extends Phaser.Scene {
     };
   }
 
+  private canPauseOffline(): boolean {
+    return this.provider.mode === 'offline' && !this.lobbyOverlay.isVisible() &&
+      !this.endGameModal.isVisible() && !this.upgradePicker.isVisible();
+  }
+
+  private setOfflinePaused(paused: boolean): void {
+    if (paused && !this.canPauseOffline()) return;
+    this.offlinePaused = paused;
+    if (paused) this.minimap.hide();
+    this.keyboard.clear();
+    this.joystick.reset();
+    if (paused && !this.pauseDialog.open) {
+      this.pauseDialog.showModal();
+      this.joystickLayerEl.style.display = 'none';
+      document.body.dataset.state = 'paused';
+    } else if (!paused && this.pauseDialog.open) {
+      this.pauseDialog.close();
+      document.body.dataset.state = 'playing';
+    }
+  }
+
+  private createMobileHud(): void {
+    this.quickItems = document.createElement('div');
+    this.quickItems.className = 'mobile-quick-items';
+    this.quickItems.setAttribute('role', 'group');
+    this.quickItems.setAttribute('aria-label', 'Itens rápidos');
+    this.quickItems.hidden = true;
+    if (this.touchControls.matches) {
+      for (const button of [this.hudMedkitBtn, this.hudReloadBtn, this.hudInteractBtn, this.hudRepairBtn]) {
+        this.quickItems.appendChild(button);
+      }
+    }
+    document.body.appendChild(this.quickItems);
+
+    this.teamStatus = document.createElement('div');
+    this.teamStatus.className = 'team-status';
+    this.teamStatus.hidden = true;
+    this.hudTopPanelEl.appendChild(this.teamStatus);
+
+    this.graphicsButton = document.createElement('button');
+    this.graphicsButton.type = 'button';
+    this.graphicsButton.className = 'mobile-graphics';
+    this.graphicsButton.hidden = true;
+    const updateLabel = () => {
+      const label = this.graphicsMode === 'auto' ? 'automático' : this.batterySaver ? 'economia' : 'padrão';
+      this.graphicsButton.textContent = `Gráficos: ${label}`;
+    };
+    updateLabel();
+    this.graphicsButton.addEventListener('click', () => {
+      this.graphicsMode = this.graphicsMode === 'auto' ? 'standard' : this.batterySaver ? 'auto' : 'economy';
+      this.world3D?.setQualityMode(this.graphicsMode);
+      this.syncViewportOrientation();
+      this.profiler?.reset();
+      updateLabel();
+      try {
+        localStorage.setItem('bit-zombie-graphics-mode', this.graphicsMode);
+      } catch {
+        // A preferência continua aplicada durante esta sessão.
+      }
+    });
+    this.utilityPanel.append(this.graphicsButton, this.hudAimModeBtn);
+  }
+
+  private createPauseControls(): void {
+    this.pauseButton = document.createElement('button');
+    this.pauseButton.type = 'button';
+    this.pauseButton.textContent = 'Pausar';
+    this.pauseButton.dataset.testid = 'pause-offline';
+    Object.assign(this.pauseButton.style, {
+      position: 'absolute', top: '4px', right: '6px', pointerEvents: 'auto',
+      zIndex: '32', minHeight: '44px', padding: '0 12px', display: 'none',
+      background: '#17261d', color: '#e4f1e7', border: '1px solid #577963', borderRadius: '8px',
+    });
+    this.pauseButton.addEventListener('click', () => this.setOfflinePaused(true));
+
+    this.pauseDialog = document.createElement('dialog');
+    this.pauseDialog.className = 'interface-card pause-card';
+    this.pauseDialog.setAttribute('aria-labelledby', 'offline-pause-title');
+    Object.assign(this.pauseDialog.style, {
+      background: '#17261d', color: '#e4f1e7', border: '1px solid #577963',
+      borderRadius: '12px', padding: '20px', width: 'min(280px, 80vw)', touchAction: 'auto',
+    });
+    const title = document.createElement('h2');
+    title.id = 'offline-pause-title';
+    title.textContent = 'Jogo pausado';
+    const resume = document.createElement('button');
+    resume.type = 'button';
+    resume.textContent = 'Continuar';
+    resume.style.minHeight = '44px';
+    resume.addEventListener('click', () => this.setOfflinePaused(false));
+    this.pauseDialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      this.setOfflinePaused(false);
+    });
+    this.pauseDialog.append(title, resume);
+    this.hudTopPanelEl.appendChild(this.pauseButton);
+    document.body.appendChild(this.pauseDialog);
+  }
+
   private startOfflineMode(
     gameMode: GameMode = this.selectedGameMode,
     seed: number = this.defaultSeed
@@ -673,7 +923,7 @@ export class GameScene extends Phaser.Scene {
     this.defaultSeed = seed;
     void this.provider.disconnect?.();
     this.resetWorldEntities();
-    this.provider = new OfflineProvider('player-1', seed, gameMode);
+    this.provider = new OfflineProvider('player-1', seed, gameMode, this.profiler?.recordStep);
     this.lobbyOverlay.setGameMode(gameMode);
     this.lobbyOverlay.setSeed(seed);
     this.lobbyOverlay.hide();
@@ -696,6 +946,7 @@ export class GameScene extends Phaser.Scene {
       const online = await OnlineProvider.createPrivateRoom(
         this.simulatedLagMs,
         {
+          onDangerPing: (ping) => this.showTeamPing(ping),
           onConnectionLost: (reason) => {
             this.startOfflineFallbackWithMenuError(reason);
           },
@@ -718,6 +969,7 @@ export class GameScene extends Phaser.Scene {
       await this.provider.disconnect?.();
       this.resetWorldEntities();
       const online = await OnlineProvider.joinPrivateRoomByCode(code, this.simulatedLagMs, {
+        onDangerPing: (ping) => this.showTeamPing(ping),
         onConnectionLost: (reason) => {
           this.startOfflineFallbackWithMenuError(reason);
         },
@@ -738,11 +990,13 @@ export class GameScene extends Phaser.Scene {
     this.provider = new OfflineProvider(
       'player-1',
       this.defaultSeed,
-      this.selectedGameMode
+      this.selectedGameMode,
+      this.profiler?.recordStep
     );
     this.endGameModal.hide();
     this.lobbyOverlay.showMenu();
     document.body.dataset.mode = 'offline';
+    this.syncWorldRender(0);
   }
 
   private startOfflineFallbackWithMenuError(errorMessage: string): void {
@@ -750,14 +1004,23 @@ export class GameScene extends Phaser.Scene {
     this.provider = new OfflineProvider(
       'player-1',
       this.defaultSeed,
-      this.selectedGameMode
+      this.selectedGameMode,
+      this.profiler?.recordStep
     );
     this.endGameModal.hide();
     this.lobbyOverlay.showMenu(errorMessage);
     document.body.dataset.mode = 'offline';
+    this.syncWorldRender(0);
   }
 
   private resetWorldEntities(): void {
+    this.profiler?.reset();
+    this.finalPresentation = undefined;
+    this.finalPresentationMs = 0;
+    this.isometricView.resetFollow();
+    this.world3D?.resetActors();
+    this.audio.reset();
+    this.setOfflinePaused(false);
     this.keyboard.clear();
     this.joystick.reset();
     this.combatEffects.clearAll();
@@ -767,8 +1030,8 @@ export class GameScene extends Phaser.Scene {
     this.extraWallSegments.length = 0;
     this.wallSegmentsGraphics?.clear();
     this.dangerPingGraphics?.clear();
-    this.visionConeGraphics?.clear();
     this.resetFogOfWarState();
+    this.minimap.hide();
 
     if (this.levelUpBannerEl) {
       this.levelUpBannerEl.style.display = 'none';
@@ -788,10 +1051,6 @@ export class GameScene extends Phaser.Scene {
       ring.destroy();
     }
     this.playerRings.clear();
-    for (const rangeRing of this.playerRangeRings.values()) {
-      rangeRing.destroy();
-    }
-    this.playerRangeRings.clear();
 
     for (const sprite of this.zombieSprites.values()) {
       sprite.destroy();
@@ -800,14 +1059,11 @@ export class GameScene extends Phaser.Scene {
     this.zombieFlashTimers.clear();
     this.zombieHpGraphics.clear();
     this.lootGraphics?.clear();
-    this.manualAimGraphics.clear();
     this.reviveGraphics?.clear();
     this.upgradePicker?.update([], 0);
   }
 
   private initFogOfWarLayers(mapWidth: number, mapHeight: number): void {
-    this.visionConeGraphics = this.add.graphics();
-    this.visionConeGraphics.setDepth(5);
 
     this.exploredCanvas = document.createElement('canvas');
     this.exploredCanvas.width = FOG_TEX_SIZE;
@@ -850,7 +1106,7 @@ export class GameScene extends Phaser.Scene {
       ctx.clearRect(0, 0, FOG_TEX_SIZE, FOG_TEX_SIZE);
       ctx.fillStyle = 'rgba(4, 7, 6, 0.90)';
       ctx.fillRect(0, 0, FOG_TEX_SIZE, FOG_TEX_SIZE);
-      this.fogTexture.refresh();
+      this.refreshFogTexture();
     }
   }
 
@@ -862,10 +1118,9 @@ export class GameScene extends Phaser.Scene {
   private isWorldPointVisibleToLocalPlayer(
     x: number,
     y: number,
-    targetRadiusPx = 0
+    targetRadiusPx: number,
+    localPlayer: RenderWorldState['players'][number] | undefined
   ): boolean {
-    const state = this.provider.getRenderState();
-    const localPlayer = state.players.find((p) => p.id === state.localPlayerId);
     if (!localPlayer) {
       return true;
     }
@@ -995,47 +1250,33 @@ export class GameScene extends Phaser.Scene {
       ctx.drawImage(this.exploredCanvas, 0, 0);
 
       ctx.globalAlpha = 1;
-      ctx.fillStyle = '#ffffff';
+      const originX = localPlayer.x * scaleX;
+      const originY = localPlayer.y * scaleY;
+      const range = BALANCE.VISION.RANGE_PX * scaleX;
+      ctx.save();
       ctx.beginPath();
       ctx.moveTo(poly[0].x * scaleX, poly[0].y * scaleY);
       for (let i = 1; i < poly.length; i += 1) {
         ctx.lineTo(poly[i].x * scaleX, poly[i].y * scaleY);
       }
       ctx.closePath();
-      ctx.fill();
-
-      ctx.beginPath();
-      ctx.arc(
-        localPlayer.x * scaleX,
-        localPlayer.y * scaleY,
-        closeRadiusTex,
-        0,
-        Math.PI * 2
-      );
-      ctx.fill();
+      ctx.clip();
+      const light = ctx.createRadialGradient(originX, originY, 0, originX, originY, range);
+      light.addColorStop(0, 'rgba(255,255,255,1)');
+      light.addColorStop(0.62, 'rgba(255,255,255,0.96)');
+      light.addColorStop(1, 'rgba(255,255,255,0.18)');
+      ctx.fillStyle = light;
+      ctx.fillRect(originX - range, originY - range, range * 2, range * 2);
       ctx.restore();
-      this.fogTexture.refresh();
-    }
 
-    // 4. Desenha contorno vetorial de alta definição do cone de visão (110°) recortado por obstáculos
-    this.visionConeGraphics.clear();
-    if (poly.length >= 3) {
-      this.visionConeGraphics.fillStyle(0xb8ffd0, 0.045);
-      this.visionConeGraphics.beginPath();
-      this.visionConeGraphics.moveTo(poly[0].x, poly[0].y);
-      for (let i = 1; i < poly.length; i += 1) {
-        this.visionConeGraphics.lineTo(poly[i].x, poly[i].y);
-      }
-      this.visionConeGraphics.closePath();
-      this.visionConeGraphics.fillPath();
-
-      this.visionConeGraphics.lineStyle(1.4, 0x7ce8a0, 0.28);
-      this.visionConeGraphics.beginPath();
-      this.visionConeGraphics.moveTo(poly[0].x, poly[0].y);
-      this.visionConeGraphics.lineTo(poly[1].x, poly[1].y);
-      this.visionConeGraphics.moveTo(poly[0].x, poly[0].y);
-      this.visionConeGraphics.lineTo(poly[poly.length - 1].x, poly[poly.length - 1].y);
-      this.visionConeGraphics.strokePath();
+      const nearby = ctx.createRadialGradient(originX, originY, 0, originX, originY, closeRadiusTex);
+      nearby.addColorStop(0, 'rgba(255,255,255,1)');
+      nearby.addColorStop(0.56, 'rgba(255,255,255,0.9)');
+      nearby.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = nearby;
+      ctx.fillRect(originX - closeRadiusTex, originY - closeRadiusTex, closeRadiusTex * 2, closeRadiusTex * 2);
+      ctx.restore();
+      this.refreshFogTexture();
     }
 
     // 5. Atualiza visibilidade dos props estáticos:
@@ -1099,12 +1340,73 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  private drawUrbanMap(
+    player: { x: number; y: number },
+    structures: BuildableStructureSnapshot[]
+  ): void {
+    this.drawWallSegments();
+    const g = this.wallSegmentsGraphics;
+    for (const b of this.urbanMap.buildings) {
+      const x = b.x - b.halfWidth;
+      const y = b.y - b.halfHeight;
+      const width = b.halfWidth * 2;
+      const height = b.halfHeight * 2;
+      g.fillStyle(b.color, 1);
+      g.fillRect(x, y, width, height);
+      const inside = Math.abs(player.x - b.x) < b.halfWidth && Math.abs(player.y - b.y) < b.halfHeight;
+      g.fillStyle(0x282b2e, inside ? 0.13 : 0.82);
+      g.fillRect(x, y, width, height);
+      g.lineStyle(2, 0x9b998a, inside ? 0.12 : 0.35);
+      g.lineBetween(x, b.y, x + width, b.y);
+    }
+    const house = this.urbanMap.house;
+    const home = house && this.urbanMap.buildings.find(b => b.doorId === house.doorId);
+    if (house && home && Math.abs(player.x - home.x) < home.halfWidth &&
+        Math.abs(player.y - home.y) < home.halfHeight) {
+      for (const room of house.rooms) {
+        g.fillStyle(room.kind === 'living' ? 0x956d4e : 0xa4a596);
+        g.fillRect(room.x - room.width / 2, room.y - room.depth / 2, room.width, room.depth);
+      }
+      for (const item of house.furniture) {
+        g.fillStyle(item.kind === 'cabinet' ? 0x70513b : 0x4c605f);
+        g.fillRoundedRect(item.x - item.radius * 0.8, item.y - item.radius / 2,
+          item.radius * 1.6, item.radius, 4);
+      }
+    }
+    for (const plant of house?.garden ?? []) {
+      g.fillStyle(0x567246);
+      g.fillCircle(plant.x, plant.y, 7);
+    }
+
+    g.lineStyle(8, 0xaaa18b);
+    for (const wall of this.urbanMap.walls) g.lineBetween(wall.x1, wall.y1, wall.x2, wall.y2);
+    g.lineStyle(5, 0x73a8b3);
+    for (const window of this.urbanMap.windows) g.lineBetween(window.x1, window.y1, window.x2, window.y2);
+    for (const door of structures) {
+      if (door.kind !== 'map_door' && door.kind !== 'shelter_door') continue;
+      g.lineStyle(6, door.hp === 0 ? 0x595753 : door.hp < door.maxHp ? 0xac6946 : 0xc5a16c);
+      const left = door.x - door.radius;
+      const right = door.open || door.hp === 0 ? left : door.x + door.radius;
+      g.lineBetween(left, door.y, right, door.y - (door.hp === 0 ? 10 : door.open ? 35 : 0));
+    }
+  }
+
+  private showTeamPing(ping: { x: number; y: number; colorIndex: number }): void {
+    this.dangerPing = { ...ping, remainingMs: 3200 };
+    this.levelUpBannerEl.textContent = `PERIGO SINALIZADO · JOGADOR ${ping.colorIndex + 1}`;
+    this.levelUpBannerEl.style.display = 'block';
+    this.levelUpBannerTimerMs = 2000;
+  }
+
   private triggerDangerPing(): void {
-    const state = this.provider.getRenderState();
+    if (performance.now() < this.nextDangerPingAt) return;
+    const state = this.readRenderState();
     const localPlayer = state.players.find((p) => p.id === state.localPlayerId);
     if (!localPlayer || !localPlayer.alive) {
       return;
     }
+    this.nextDangerPingAt = performance.now() + 1500;
+    if (this.provider instanceof OnlineProvider) this.provider.sendDangerPing();
     const pingDist = 180;
     const px = Math.max(
       24,
@@ -1151,21 +1453,23 @@ export class GameScene extends Phaser.Scene {
     this.dangerPingGraphics.fillCircle(this.dangerPing.x, this.dangerPing.y, 4);
   }
 
-  private processTransientEvents(): void {
+  private processTransientEvents(state = this.readRenderState()): void {
     const events = this.provider.consumeNewEvents();
-    const state = this.provider.getRenderState();
+    if (events.length) this.world3D?.consumeCharacterEvents(events, state);
     const localPlayer = state.players.find((p) => p.id === state.localPlayerId);
 
     for (const ev of events) {
+      if (!this.lobbyOverlay.isVisible() && !this.offlinePaused) this.audio.event(ev);
       if (ev.type === 'fire') {
         const originVisible = this.isWorldPointVisibleToLocalPlayer(
           ev.fromX,
           ev.fromY,
-          8
+          8,
+          localPlayer
         );
         this.combatEffects.onWeaponFire(ev, originVisible);
       } else if (ev.type === 'hit') {
-        const hitVisible = this.isWorldPointVisibleToLocalPlayer(ev.x, ev.y, 16);
+        const hitVisible = this.isWorldPointVisibleToLocalPlayer(ev.x, ev.y, 16, localPlayer);
         this.combatEffects.onProjectileHit(ev, hitVisible);
         if (!ev.killed && hitVisible) {
           this.zombieFlashTimers.set(ev.zombieId, 65);
@@ -1210,7 +1514,12 @@ export class GameScene extends Phaser.Scene {
         this.levelUpBannerTimerMs = 2800;
       } else if (ev.type === 'horde_warning') {
         const secs = Math.round(ev.warningMs / 1000);
-        this.levelUpBannerEl.textContent = `ALERTA DE HORDA #${ev.hordeNumber}! CHEGADA EM ${secs}s`;
+        this.levelUpBannerEl.textContent = `ALERTA DE HORDA #${ev.hordeNumber}! CHEGADA EM ${secs}s${ev.direction ? ' · ' + ev.direction.toUpperCase() : ''}`;
+        this.levelUpBannerEl.style.display = 'block';
+        this.levelUpBannerTimerMs = 3400;
+      } else if (ev.type === 'horde_cleared') {
+        const seconds = Math.ceil(ev.recoveryMs / 1000);
+        this.levelUpBannerEl.textContent = `HORDA VENCIDA · ${seconds}s PARA RECUPERAR E RECONSTRUIR`;
         this.levelUpBannerEl.style.display = 'block';
         this.levelUpBannerTimerMs = 3400;
       } else if (ev.type === 'horde_started') {
@@ -1218,10 +1527,10 @@ export class GameScene extends Phaser.Scene {
         this.levelUpBannerEl.style.display = 'block';
         this.levelUpBannerTimerMs = 3000;
       } else if (ev.type === 'melee_swing') {
-        const originVisible = this.isWorldPointVisibleToLocalPlayer(ev.x, ev.y, 12);
+        const originVisible = this.isWorldPointVisibleToLocalPlayer(ev.x, ev.y, 12, localPlayer);
         this.combatEffects.onMeleeSwing(ev, originVisible);
       } else if (ev.type === 'weapon_noise') {
-        const originVisible = this.isWorldPointVisibleToLocalPlayer(ev.x, ev.y, 12);
+        const originVisible = this.isWorldPointVisibleToLocalPlayer(ev.x, ev.y, 12, localPlayer);
         this.combatEffects.onWeaponNoise(ev, originVisible);
       } else if (ev.type === 'loot_picked') {
         if (ev.playerId === this.provider.localPlayerId) {
@@ -1254,10 +1563,7 @@ export class GameScene extends Phaser.Scene {
           this.levelUpBannerEl.style.display = 'block';
           this.levelUpBannerTimerMs = 2000;
         }
-      } else if (ev.type === 'horde_cleared') {
-        this.levelUpBannerEl.textContent = `HORDA #${ev.hordeNumber} ELIMINADA! JANELA DE RECUPERAÇÃO`;
-        this.levelUpBannerEl.style.display = 'block';
-        this.levelUpBannerTimerMs = 3000;
+
       }
     }
   }
@@ -1290,7 +1596,7 @@ export class GameScene extends Phaser.Scene {
   private handleRestartMatch(): void {
     this.resetWorldEntities();
     this.provider.restart();
-    const state = this.provider.getRenderState();
+    const state = this.readRenderState();
     this.renderPropsForSeed(state.seed, state.props);
     this.syncWorldRender(0);
     document.body.dataset.state = 'playing';
@@ -1299,15 +1605,35 @@ export class GameScene extends Phaser.Scene {
   private readCombinedInput(): Vec2 {
     const kb = this.keyboard.getVector();
     const joy = this.joystick.getVector();
-
-    if (joy.x !== 0 || joy.y !== 0) {
-      return normalizeInputVector(joy.x, joy.y);
-    }
-    return kb;
+    const input = joy.x !== 0 || joy.y !== 0 ? joy : kb;
+    return this.isometricProjection?.inputToGround(input) ?? normalizeInputVector(input.x, input.y);
   }
 
-  private syncWorldRender(deltaMs: number): void {
-    const state = this.provider.getRenderState();
+  private refreshFogTexture(): void {
+    if (this.world3D?.available) this.world3D.markFogDirty();
+    else this.fogTexture.refresh();
+  }
+
+  private readonly onZoomWheel = (event: WheelEvent): void => {
+    if (!event.deltaY || !this.world3D?.available || this.lobbyOverlay.isVisible() ||
+        this.offlinePaused || this.endGameModal.isVisible() || event.ctrlKey || event.metaKey) return;
+    event.preventDefault();
+    this.adjustZoom(event.deltaY < 0 ? 1 : -1);
+  };
+
+  private adjustZoom(direction?: -1 | 1): void {
+    this.isometricView.changeZoom(direction);
+    this.zoomButton.textContent = `Zoom ${Math.round(this.isometricView.zoom * 100)}%`;
+    this.syncWorldRender(0);
+  }
+
+  private readRenderState(): RenderWorldState {
+    return this.profiler
+      ? this.profiler.measure('snapshot', () => this.provider.getRenderState())
+      : this.provider.getRenderState();
+  }
+
+  private syncWorldRender(deltaMs: number, state = this.readRenderState(), cameraDeltaMs = deltaMs): void {
     this.renderPropsForSeed(state.seed, state.props);
 
     // Sincroniza visibilidade do Lobby quando estiver no modo online (lobby ou countdown)
@@ -1330,31 +1656,63 @@ export class GameScene extends Phaser.Scene {
 
     const showInGameHudBtn =
       !this.lobbyOverlay.isVisible() && !this.endGameModal.isVisible();
+    const showPause = this.canPauseOffline();
+    this.pauseButton.style.display = showPause ? 'block' : 'none';
+    this.hudStatusTextEl.style.paddingRight = showPause ? '76px' : '';
+    this.hudMetricsTextEl.style.paddingRight = showPause ? '76px' : '';
+    this.hudStack.hidden = !showInGameHudBtn;
+    if (!showInGameHudBtn) this.utilityPanel.open = false;
     this.hudTopPanelEl.style.display = showInGameHudBtn ? 'flex' : 'none';
     this.hudWeaponBarEl.style.display = showInGameHudBtn ? 'flex' : 'none';
     this.hudSurvivalBarEl.style.display = showInGameHudBtn ? 'flex' : 'none';
+    if (!showInGameHudBtn && !this.inventoryPanel.hidden) {
+      this.inventoryPanel.hidden = true;
+      this.hudSurvivalBarEl.querySelector('[aria-controls=survival-inventory]')?.setAttribute('aria-expanded', 'false');
+    }
     this.hudHintBarEl.style.display = showInGameHudBtn ? 'block' : 'none';
-    this.joystickLayerEl.style.display = showInGameHudBtn ? 'block' : 'none';
-    this.hudAimModeBtn.style.display = showInGameHudBtn ? 'block' : 'none';
-    this.hudAttackBtn.style.display = showInGameHudBtn ? 'flex' : 'none';
-    this.hudPingDangerBtn.style.display = showInGameHudBtn ? 'block' : 'none';
+    const showTouchControls = showInGameHudBtn && this.touchControls.matches;
+    const quickItemsTarget = this.touchControls.matches
+      ? this.quickItems : this.hudSurvivalBarEl.querySelector('.desktop-quick-heal');
+    if (quickItemsTarget && this.hudMedkitBtn.parentElement !== quickItemsTarget) {
+      quickItemsTarget.appendChild(this.hudMedkitBtn);
+      for (const button of [this.hudReloadBtn, this.hudInteractBtn, this.hudRepairBtn]) {
+        (this.touchControls.matches ? this.quickItems : document.body).appendChild(button);
+      }
+    }
+    this.quickItems.hidden = !showTouchControls;
+    this.graphicsButton.hidden = !showInGameHudBtn;
+    this.teamStatus.hidden = !showInGameHudBtn || this.provider.mode !== 'online';
+    if (!this.teamStatus.hidden) {
+      const status = state.players.filter((p) => p.id !== state.localPlayerId).map((p) =>
+        `J${p.colorIndex + 1} ${!p.connected ? 'offline' : !p.alive ? 'caído' : Math.ceil(p.hp) + ' HP'}`
+      ).join(' · ');
+      if (this.teamStatus.textContent !== status) this.teamStatus.textContent = status;
+    }
+    this.joystickLayerEl.style.display = showTouchControls ? 'block' : 'none';
+    this.hudAimModeBtn.style.display = showTouchControls ? 'block' : 'none';
+    this.hudAttackBtn.style.display = showTouchControls ? 'flex' : 'none';
+    this.hudPingDangerBtn.style.display = showTouchControls && this.provider.mode === 'online' ? 'block' : 'none';
     this.updateSkipIntermissionButton(state, showInGameHudBtn);
 
-    this.manualAimGraphics.clear();
     this.reviveGraphics.clear();
     this.lootGraphics.clear();
 
     this.visionObstacles = buildObstaclesFromProps(
       state.props,
-      this.extraWallSegments,
-      [],
+      [...this.extraWallSegments, ...this.urbanMap.walls, ...this.urbanMap.windows],
+      this.urbanMap.house?.furniture,
       state.lootContainers ?? [],
       state.structures ?? []
     );
 
     const localPlayer = state.players.find((p) => p.id === state.localPlayerId);
     if (localPlayer) {
-      this.updateVisionAndFogOfWar(localPlayer, state.mapWidth, state.mapHeight);
+      this.drawUrbanMap(localPlayer, state.structures ?? []);
+      if (this.profiler) {
+        this.profiler.measure('fog', () => this.updateVisionAndFogOfWar(localPlayer, state.mapWidth, state.mapHeight));
+      } else {
+        this.updateVisionAndFogOfWar(localPlayer, state.mapWidth, state.mapHeight);
+      }
       this.drawWorldLootAndContainers(
         localPlayer,
         state.lootItems ?? [],
@@ -1373,17 +1731,11 @@ export class GameScene extends Phaser.Scene {
 
       let sprite = this.playerSprites.get(p.id);
       let ring = this.playerRings.get(p.id);
-      let rangeRing = this.playerRangeRings.get(p.id);
-      const equippedSpec = getWeaponDefinition(p.activeWeaponId ?? 'knife');
 
-      if (!sprite || !ring || !rangeRing) {
+      if (!sprite || !ring) {
         const texKey =
           p.colorIndex % 2 === 0 ? TEXTURE_KEYS.PLAYER_BLUE : TEXTURE_KEYS.PLAYER_ORANGE;
-        const ringColor = p.colorIndex % 2 === 0 ? 0x2b95ff : 0xff7b29;
-
-        rangeRing = this.add.circle(p.x, p.y, equippedSpec.rangePx);
-        rangeRing.setStrokeStyle(1, ringColor, 0.14);
-        rangeRing.setDepth(3);
+        const ringColor = BALANCE.NETWORK.PLAYER_COLORS[p.colorIndex] ?? 0x2b95ff;
 
         ring = this.add.circle(p.x, p.y, p.radius, ringColor, 0.16);
         ring.setStrokeStyle(1.5, ringColor, 0.7);
@@ -1393,19 +1745,16 @@ export class GameScene extends Phaser.Scene {
         sprite.setScale(invTexScale);
         sprite.setDepth(10);
 
-        this.playerRangeRings.set(p.id, rangeRing);
         this.playerRings.set(p.id, ring);
         this.playerSprites.set(p.id, sprite);
       }
 
-      rangeRing.setPosition(p.x, p.y);
-      rangeRing.setRadius(equippedSpec.rangePx);
       ring.setPosition(p.x, p.y);
       sprite.setPosition(p.x, p.y);
       sprite.setScale(invTexScale);
       sprite.setRotation(p.facingAngle);
 
-      const baseRingColor = p.colorIndex % 2 === 0 ? 0x2b95ff : 0xff7b29;
+      const baseRingColor = BALANCE.NETWORK.PLAYER_COLORS[p.colorIndex] ?? 0x2b95ff;
 
       // Feedback visual de morte (e círculo de resgate na Fase 2), desconexão (20s) ou janela de invulnerabilidade
       if (!p.alive) {
@@ -1451,42 +1800,10 @@ export class GameScene extends Phaser.Scene {
         ring.setStrokeStyle(1.5, baseRingColor, 0.7);
       }
 
-      if (p.id === state.localPlayerId && this.cameraTargetId !== p.id) {
-        this.cameras.main.startFollow(sprite, true, 1, 1);
-        this.cameraTargetId = p.id;
-      }
-
-      // Desenha linha guia de mira tática para o jogador local indicando a direção e alcance da arma equipada
-      if (p.id === state.localPlayerId && p.alive) {
-        const rightStick = this.joystick.getRightAimState();
-        const dirX = Math.cos(p.facingAngle);
-        const dirY = Math.sin(p.facingAngle);
-        const startX = p.x + dirX * (p.radius + 6);
-        const startY = p.y + dirY * (p.radius + 6);
-        const endX = p.x + dirX * equippedSpec.rangePx;
-        const endY = p.y + dirY * equippedSpec.rangePx;
-        const laserAlpha =
-          rightStick.active || this.joystick.isAttackHeld() ? 0.55 : 0.24;
-        const laserColor =
-          equippedSpec.category === 'melee'
-            ? 0x78c4ff
-            : this.localAimMode === 'manual'
-              ? 0xff8a3d
-              : 0x63cf88;
-
-        this.manualAimGraphics.lineStyle(1.5, laserColor, laserAlpha);
-        this.manualAimGraphics.beginPath();
-        this.manualAimGraphics.moveTo(startX, startY);
-        this.manualAimGraphics.lineTo(endX, endY);
-        this.manualAimGraphics.strokePath();
-        this.manualAimGraphics.fillStyle(laserColor, laserAlpha + 0.15);
-        this.manualAimGraphics.fillCircle(endX, endY, 3.5);
-      }
-
       if (p.id === state.localPlayerId) {
         this.updateHud(state, p.hp, p.maxHp);
         this.updateWeaponHudBar(p, showInGameHudBtn);
-        this.updateSurvivalHudBar(p, state.structures ?? [], showInGameHudBtn);
+        this.updateSurvivalHudBar(p, state.players, state.structures ?? [], showInGameHudBtn, state.gameMode);
         if (showInGameHudBtn) {
           this.upgradePicker.update(
             p.pendingUpgradeOptions,
@@ -1584,13 +1901,8 @@ export class GameScene extends Phaser.Scene {
         this.playerSprites.delete(id);
         this.playerRings.get(id)?.destroy();
         this.playerRings.delete(id);
-        this.playerRangeRings.get(id)?.destroy();
-        this.playerRangeRings.delete(id);
       }
     }
-
-    // Indicador de direção do aliado fora da tela (Coop 2 jogadores)
-    this.updateOffscreenAllyIndicator(state);
 
     // 2. Atualiza zumbis vivos e barras de vida aplicando estritamente o cone de visão (Etapa 2)
     this.zombieHpGraphics.clear();
@@ -1615,7 +1927,7 @@ export class GameScene extends Phaser.Scene {
       zSprite.setScale(baseZombieScale * invTexScale);
 
       // Regra Etapa 2: Zumbis só aparecem quando estão dentro da visão válida do jogador local
-      const isVisible = this.isWorldPointVisibleToLocalPlayer(z.x, z.y, z.radius);
+      const isVisible = this.isWorldPointVisibleToLocalPlayer(z.x, z.y, z.radius, localPlayer);
       zSprite.setVisible(isVisible);
 
       if (!isVisible) {
@@ -1636,7 +1948,10 @@ export class GameScene extends Phaser.Scene {
         if (z.isElite) {
           zSprite.setTint(0xffb84d);
         } else {
-          zSprite.clearTint();
+          const tint = z.kind === 'spitter' ? 0xa6e950 : z.kind === 'caller' ? 0xc48de0 :
+            z.kind === 'demolisher' ? 0xe07854 : undefined;
+          if (tint !== undefined) zSprite.setTint(tint);
+          else zSprite.clearTint();
         }
       }
 
@@ -1673,6 +1988,10 @@ export class GameScene extends Phaser.Scene {
 
     // 3. Verifica Fim de Jogo (e oculta modal se outro jogador reiniciou a partida no coop)
     if (state.gameOver && !this.endGameModal.isVisible()) {
+      if (this.world3D?.available) {
+        this.finalPresentation = state;
+        this.finalPresentationMs = 1600;
+      }
       this.endGameModal.show({
         gameMode: state.gameMode,
         elapsedMs: state.elapsedMs,
@@ -1690,8 +2009,104 @@ export class GameScene extends Phaser.Scene {
       this.endGameModal.hide();
     }
 
-    // 4. Atualiza painel ?debug se estiver ativo
-    this.debugOverlay.update(this.game.loop.actualFps || 60, state);
+    if (state.phase === 'playing' && !state.gameOver && showInGameHudBtn && !this.offlinePaused && localPlayer) {
+      this.minimap.update(state, this.urbanMap, this.exploredCanvas, localPlayer);
+    } else {
+      this.minimap.hide();
+    }
+
+    const use3D = Boolean(this.world3D?.available);
+    this.isometricProjection = use3D ? this.isometricView.update(
+      localPlayer ?? { x: state.mapWidth / 2, y: state.mapHeight / 2 },
+      this.logicalWidth, this.logicalHeight, cameraDeltaMs,
+    ) : undefined;
+    this.zoomButton.hidden = !use3D;
+    this.fogImage.setVisible(!use3D);
+    if (use3D) {
+      this.cameras.main.stopFollow();
+      this.cameras.main.setScroll(0, 0);
+      this.cameraTargetId = null;
+    } else if (localPlayer && this.cameraTargetId !== localPlayer.id) {
+      const sprite = this.playerSprites.get(localPlayer.id);
+      if (sprite) this.cameras.main.startFollow(sprite, true, 1, 1);
+      this.cameraTargetId = localPlayer.id;
+    }
+    this.ground.setVisible(!use3D);
+    this.arenaGraphics.setVisible(!use3D);
+    this.wallSegmentsGraphics.setVisible(!use3D);
+    for (const { image } of this.propEntries) {
+      if (use3D) image.setVisible(false);
+    }
+    for (const player of state.players) {
+      this.playerSprites.get(player.id)?.setVisible(!use3D);
+    }
+    if (use3D) {
+      for (const sprite of this.zombieSprites.values()) sprite.setVisible(false);
+    }
+    document.body.dataset.renderer = use3D ? '3d' : '2d';
+
+    this.presentationDeltaMs = cameraDeltaMs;
+    this.pendingPresentation = state;
+  }
+
+  private applyGroundProjection(camera: Phaser.Cameras.Scene2D.Camera): void {
+    const projection = this.isometricProjection;
+    if (!projection) return;
+    const viewport = { x: camera.x, y: camera.y, width: camera.width, height: camera.height };
+    const origin = projection.worldToScreen({ x: 0, y: 0 }, viewport);
+    const east = projection.worldToScreen({ x: 1, y: 0 }, viewport);
+    const south = projection.worldToScreen({ x: 0, y: 1 }, viewport);
+    camera.scrollX = 0;
+    camera.scrollY = 0;
+    // Phaser 3.90 renderers consume this matrix, although its declaration omits it.
+    const matrix = (camera as Phaser.Cameras.Scene2D.Camera & {
+      matrix: Phaser.GameObjects.Components.TransformMatrix;
+    }).matrix;
+    matrix.setTransform(
+      east.x - origin.x, east.y - origin.y, south.x - origin.x, south.y - origin.y, origin.x, origin.y,
+    );
+  }
+
+  private readonly onVisibilityChange = (): void => {
+    this.profiler?.suspend();
+    this.world3D?.resetQualitySampling();
+  };
+
+  private presentWorld(): void {
+    const state = this.pendingPresentation;
+    if (!state) return;
+    this.pendingPresentation = undefined;
+
+    // Phaser resolves follow, bounds and camera shake during its render pass.
+    const camera = this.cameras.main;
+    let projection = this.isometricProjection;
+    if (!projection) {
+      const start = camera.getWorldPoint(camera.x, camera.y);
+      const end = camera.getWorldPoint(camera.x + camera.width, camera.y + camera.height);
+      projection = new GroundProjection({
+        x: start.x, y: start.y, width: end.x - start.x, height: end.y - start.y,
+      });
+    }
+    this.projection = projection;
+    const rect = this.game.canvas.getBoundingClientRect();
+    this.updateOffscreenAllyIndicator(state, projection, rect);
+
+    const renderer = this.world3D;
+    const use3D = renderer?.available && rect.width > 0 && rect.height > 0;
+    if (use3D) {
+      const localPlayer = state.players.find((p) => p.id === state.localPlayerId);
+      const render = () => renderer.render(state, projection, rect.width, rect.height, this.presentationDeltaMs,
+        (x, y, radius) => this.isWorldPointVisibleToLocalPlayer(x, y, radius, localPlayer));
+      if (this.profiler) this.profiler.measure('three', render);
+      else render();
+    }
+    if (this.profiler) {
+      const timings = this.profiler.finish();
+      if (timings) {
+        this.debugOverlay.update(this.game.loop.actualFps, state, timings,
+          use3D ? renderer.getCounters() : undefined, rect, this.batterySaver);
+      }
+    }
   }
 
   private updateSkipIntermissionButton(
@@ -1729,7 +2144,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private updateOffscreenAllyIndicator(
-    state: ReturnType<IWorldProvider['getRenderState']>
+    state: RenderWorldState,
+    projection: GroundProjection,
+    rect: DOMRect
   ): void {
     const localPlayer = state.players.find((p) => p.id === state.localPlayerId);
     const ally = state.players.find(
@@ -1741,47 +2158,31 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const cam = this.cameras.main;
-    const viewLeft =
-      cam.worldView && cam.worldView.width > 0
-        ? cam.worldView.x
-        : localPlayer.x - this.logicalWidth * 0.5;
-    const viewTop =
-      cam.worldView && cam.worldView.height > 0
-        ? cam.worldView.y
-        : localPlayer.y - this.logicalHeight * 0.5;
+    const view = { x: 0, y: 0, width: this.logicalWidth, height: this.logicalHeight };
+    const screen = projection.worldToScreen(ally, view);
     const margin = 36;
     const isInsideView =
-      ally.x >= viewLeft + margin &&
-      ally.x <= viewLeft + this.logicalWidth - margin &&
-      ally.y >= viewTop + margin &&
-      ally.y <= viewTop + this.logicalHeight - margin;
+      screen.x >= margin && screen.x <= view.width - margin &&
+      screen.y >= margin && screen.y <= view.height - margin;
 
     if (isInsideView) {
       this.allyIndicatorEl.style.display = 'none';
       return;
     }
 
-    const angle = Math.atan2(ally.y - localPlayer.y, ally.x - localPlayer.x);
-    const winW = Math.max(1, window.innerWidth);
-    const winH = Math.max(1, window.innerHeight);
-    const centerX = winW / 2;
-    const centerY = winH / 2;
-    const radiusX = Math.max(40, centerX - 38);
-    const radiusY = Math.max(40, centerY - 58);
+    const allyCss = projection.worldToScreen(ally, rect);
+    const playerCss = projection.worldToScreen(localPlayer, rect);
+    const angle = Math.atan2(allyCss.y - playerCss.y, allyCss.x - playerCss.x);
+    const centerX = rect.x + rect.width / 2;
+    const centerY = rect.y + rect.height / 2;
+    const radiusX = Math.max(40, rect.width / 2 - 38);
+    const radiusY = Math.max(40, rect.height / 2 - 58);
     const indX = centerX + Math.cos(angle) * radiusX;
     const indY = centerY + Math.sin(angle) * radiusY;
     const isDowned = !ally.alive;
-    const borderHex = isDowned
-      ? '#ff4c4c'
-      : ally.colorIndex % 2 === 0
-        ? '#2b95ff'
-        : '#ff7b29';
-    const textHex = isDowned
-      ? '#ff7a7a'
-      : ally.colorIndex % 2 === 0
-        ? '#6db8ff'
-        : '#ff9d5c';
+    const allyHex = '#' + (BALANCE.NETWORK.PLAYER_COLORS[ally.colorIndex] ?? 0x2b95ff).toString(16).padStart(6, '0');
+    const borderHex = isDowned ? '#ff4c4c' : allyHex;
+    const textHex = isDowned ? '#ff7a7a' : allyHex;
     const sizePx = isDowned ? 36 : 30;
 
     this.allyIndicatorEl.style.display = 'flex';
@@ -1791,13 +2192,14 @@ export class GameScene extends Phaser.Scene {
     this.allyIndicatorEl.style.top = `${Math.round(indY)}px`;
     this.allyIndicatorEl.style.borderColor = borderHex;
     this.allyIndicatorEl.style.color = textHex;
-    this.allyIndicatorEl.textContent = isDowned ? 'SOS' : 'P2';
+    this.allyIndicatorEl.textContent = isDowned ? 'SOS' : `J${ally.colorIndex + 1}`;
   }
 
   private getZombieTextureKey(kind: ZombieKind): string {
     switch (kind) {
       case 'fast':
         return TEXTURE_KEYS.ZOMBIE_FAST;
+      case 'demolisher':
       case 'brute':
         return TEXTURE_KEYS.ZOMBIE_BRUTE;
       case 'common':
@@ -1811,25 +2213,12 @@ export class GameScene extends Phaser.Scene {
     hp: number,
     maxHp: number
   ): void {
-    const isNarrow = window.innerWidth < 560;
     const hpRatio = Math.max(0, Math.min(1, hp / Math.max(1, maxHp)));
     const xpRatio = Math.max(0, Math.min(1, state.xp / Math.max(1, state.xpToNextLevel)));
-
-    this.hudHpFillEl.style.width = `${(hpRatio * 100).toFixed(1)}%`;
-    this.hudHpFillEl.style.backgroundColor = hpRatio > 0.3 ? '#38b865' : '#e04848';
-    this.hudXpFillEl.style.width = `${(xpRatio * 100).toFixed(1)}%`;
-
-    const timeFormatted = formatSurvivalTime(state.elapsedMs);
-    const roomLabel =
-      state.roomCode === 'SOLO'
-        ? isNarrow
-          ? 'SOLO'
-          : 'MODO SOLO'
-        : `SALA ${state.roomCode}`;
-
-    this.hudStatusTextEl.textContent = isNarrow
-      ? `HP ${Math.round(hp)}/${maxHp} · NV ${state.level} (XP ${state.xp}/${state.xpToNextLevel}) · ${timeFormatted}`
-      : `HP ${Math.round(hp)}/${maxHp}   ·   NV ${state.level} (XP ${state.xp}/${state.xpToNextLevel})   ·   TEMPO ${timeFormatted}`;
+    this.hudHpFillEl.style.width = `${hpRatio * 100}%`;
+    this.hudHpFillEl.style.backgroundColor = hpRatio > 0.3 ? '#a8b883' : '#e06454';
+    this.hudXpFillEl.style.width = `${xpRatio * 100}%`;
+    this.hudStatusTextEl.textContent = `${Math.ceil(hp)}/${maxHp} HP · Nível ${state.level}`;
 
     if (state.gameMode === 'exploration' && state.explorationState) {
       const exp = state.explorationState;
@@ -1842,9 +2231,7 @@ export class GameScene extends Phaser.Scene {
         phaseTag = `RECUPERAÇÃO (${Math.ceil(exp.recoveryRemainingMs / 1000)}s)`;
       }
 
-      this.hudMetricsTextEl.textContent = isNarrow
-        ? `EXPLORAÇÃO · DIA ${exp.daysSurvived} · ${phaseTag} · SETORES ${exp.sectorsExplored} · ABATES ${state.kills}`
-        : `EXPLORAÇÃO  ·  DIA ${exp.daysSurvived}  ·  ${phaseTag}  ·  SETORES ${exp.sectorsExplored}  ·  ABATES ${state.kills}  ·  ${roomLabel}`;
+      this.hudMetricsTextEl.textContent = `Dia ${exp.daysSurvived} · ${phaseTag}`;
     } else {
       const rState = state.roundsState;
       const rNum = rState?.roundNumber ?? 1;
@@ -1856,19 +2243,18 @@ export class GameScene extends Phaser.Scene {
             ? `RODADA ELITE ${rNum} (RESTAM ${rRem})`
             : `RODADA ${rNum} (RESTAM ${rRem})`;
 
-      this.hudMetricsTextEl.textContent = isNarrow
-        ? `${rPhase} · ABATES ${state.kills} · DANO ${Math.round(state.totalDamageDealt)} · ${roomLabel}`
-        : `${rPhase}  ·  ABATES ${state.kills}  ·  DANO ${Math.round(state.totalDamageDealt)}  ·  RESGATES ${state.totalRevives}  ·  ${roomLabel}`;
+      this.hudMetricsTextEl.textContent = rPhase;
     }
 
-    if (this.localAimMode === 'manual') {
-      this.hudHintBarEl.textContent = isNarrow
-        ? 'Esq: Mover · Dir: Olhar (110°) · Botão ATACAR · (M) Auto'
-        : 'WASD / Esq: Mover  ·  Mouse / Dir: Olhar (Cone 110°)  ·  Clique / Botão ATACAR: Disparar  ·  (M) Auto';
+    const manual = this.localAimMode === 'manual';
+    if (this.touchControls.matches) {
+      this.hudHintBarEl.textContent = manual
+        ? 'Esq: mover · Dir: mirar · Segure Atacar e arraste para ajustar a mira'
+        : 'Esq: mover · Dir: mirar · Disparo automático';
     } else {
-      this.hudHintBarEl.textContent = isNarrow
-        ? 'Esq: Mover · Dir: Olhar (110°) · Auto-Tiro no Cone · (M) Manual'
-        : 'WASD / Esq: Mover  ·  Mouse / Dir: Orientar Visão (110°)  ·  Auto-Tiro dentro da Visão  ·  (M) Manual';
+      this.hudHintBarEl.textContent = manual
+        ? 'WASD: mover · Mouse: mirar · Clique: atacar · M: automático · Q: sinalizar'
+        : 'WASD: mover · Mouse: mirar · M: disparo manual · Q: sinalizar';
     }
   }
 
@@ -1881,6 +2267,14 @@ export class GameScene extends Phaser.Scene {
     }
     this.currentSeedRendered = seed;
     this.propsGroup.clear(true, true);
+    this.urbanMap = generateUrbanMap(seed);
+    for (const label of this.buildingLabels) label.destroy();
+    this.buildingLabels.length = 0;
+    for (const b of this.urbanMap.buildings) {
+      this.buildingLabels.push(this.add.text(b.x, b.y - b.halfHeight + 20, b.name, {
+        fontSize: '13px', color: '#eee4cf', stroke: '#22201c', strokeThickness: 3,
+      }).setOrigin(0.5).setDepth(6));
+    }
     this.propEntries.length = 0;
 
     const kindToTexture: Record<PropKind, string> = {
@@ -1902,12 +2296,21 @@ export class GameScene extends Phaser.Scene {
       this.propEntries.push({ prop, image: img });
     }
 
-    this.visionObstacles = buildObstaclesFromProps(props, this.extraWallSegments);
+    this.visionObstacles = buildObstaclesFromProps(props, [...this.extraWallSegments, ...this.urbanMap.walls, ...this.urbanMap.windows], this.urbanMap.house?.furniture);
   }
 
   private drawArenaBoundariesAndLandmarks(mapWidth: number, mapHeight: number): void {
     const g = this.add.graphics();
+    this.arenaGraphics = g;
     g.setDepth(1);
+    g.fillStyle(0x343937, 1);
+    for (const row of [0.19, 0.81]) {
+      g.fillRect(0, mapHeight * row + 172, mapWidth, 72);
+      g.lineStyle(2, 0x777464, 0.7);
+      g.lineBetween(0, mapHeight * row + 208, mapWidth, mapHeight * row + 208);
+    }
+    g.fillRect(mapWidth * 0.355 - 36, 0, 72, mapHeight);
+    g.fillRect(mapWidth * 0.645 - 36, 0, 72, mapHeight);
 
     g.lineStyle(1, 0x2c352f, 0.32);
     const step = 250;
@@ -1998,6 +2401,7 @@ export class GameScene extends Phaser.Scene {
       border: '1px solid rgba(255, 255, 255, 0.06)',
     });
     this.hudHpFillEl = document.createElement('div');
+    this.hudHpFillEl.dataset.testid = 'hud-hp-fill';
     Object.assign(this.hudHpFillEl.style, {
       width: '100%',
       height: '100%',
@@ -2016,6 +2420,7 @@ export class GameScene extends Phaser.Scene {
       border: '1px solid rgba(255, 255, 255, 0.06)',
     });
     this.hudXpFillEl = document.createElement('div');
+    this.hudXpFillEl.dataset.testid = 'hud-xp-fill';
     Object.assign(this.hudXpFillEl.style, {
       width: '0%',
       height: '100%',
@@ -2154,14 +2559,6 @@ export class GameScene extends Phaser.Scene {
       whiteSpace: 'nowrap',
     });
 
-    const buildActionsRow = document.createElement('div');
-    Object.assign(buildActionsRow.style, {
-      display: 'flex',
-      flexWrap: 'wrap',
-      alignItems: 'center',
-      gap: '5px',
-    });
-
     const makeSurvivalBtn = (
       label: string,
       testId: string,
@@ -2207,14 +2604,108 @@ export class GameScene extends Phaser.Scene {
       this.provider.useMedkit?.()
     );
 
-    buildActionsRow.append(
-      this.hudBuildWoodBtn,
-      this.hudBuildTrapBtn,
-      this.hudBuildScrapBtn,
-      this.hudMedkitBtn
-    );
-    this.hudSurvivalBarEl.append(this.hudResourcesStatusEl, buildActionsRow);
-    document.body.appendChild(this.hudSurvivalBarEl);
+    this.shelterButtons.clear();
+    this.shelterControls = document.createElement('div');
+    Object.assign(this.shelterControls.style, { flexWrap: 'wrap', gap: '5px' });
+    for (const kind of ['shelter_marker', 'shelter_wall', 'shelter_door', 'slow_trap', 'storage'] as const) {
+      const { name, woodCost, scrapCost } = getStructureDefinition(kind);
+      const cost = woodCost || scrapCost ? ` (${woodCost}M+${scrapCost}S)` : '';
+      const button = makeSurvivalBtn(name + cost, 'build-' + kind, () => this.provider.buildStructure?.(kind));
+      this.shelterButtons.set(kind, button);
+      this.shelterControls.appendChild(button);
+    }
+    const inventoryButton = makeSurvivalBtn('INVENTÁRIO', 'btn-inventory', () => {
+      this.inventoryPanel.hidden = !this.inventoryPanel.hidden;
+      if (!this.inventoryPanel.hidden) {
+        construction.open = false;
+        this.utilityPanel.open = false;
+      }
+      inventoryButton.setAttribute('aria-expanded', String(!this.inventoryPanel.hidden));
+    });
+    inventoryButton.setAttribute('aria-expanded', 'false');
+    inventoryButton.setAttribute('aria-controls', 'survival-inventory');
+    inventoryButton.style.minHeight = '44px';
+
+    this.inventoryPanel = document.createElement('div');
+    this.inventoryPanel.id = 'survival-inventory';
+    this.inventoryPanel.hidden = true;
+    Object.assign(this.inventoryPanel.style, {
+      width: '100%', maxHeight: '36dvh', overflowY: 'auto', overscrollBehavior: 'contain',
+      touchAction: 'pan-y',
+    });
+    this.supplyRows = SUPPLY_SLOTS.map((slot) => {
+      const row = document.createElement('div');
+      Object.assign(row.style, {
+        display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 46px auto auto', gap: '4px',
+        alignItems: 'center', minHeight: '45px', color: '#e3f5ea', borderTop: '1px solid #324238',
+      });
+      const quantity = document.createElement('span');
+      const amount = document.createElement('input');
+      amount.type = 'number';
+      amount.inputMode = 'numeric';
+      amount.required = true;
+      amount.min = '1';
+      amount.step = '1';
+      amount.value = '1';
+      amount.setAttribute('aria-label', 'Quantidade de ' + slot.label);
+      amount.addEventListener('keydown', (event) => event.stopPropagation());
+      Object.assign(amount.style, { width: '100%', minHeight: '40px', boxSizing: 'border-box' });
+      const drop = makeSurvivalBtn('Soltar', 'drop-' + slot.kind, () => {
+        if (amount.checkValidity()) this.provider.moveSupply?.(slot.kind, amount.valueAsNumber, 'drop');
+      });
+      const share = makeSurvivalBtn('Dar', 'share-' + slot.kind, () => {
+        if (amount.checkValidity()) this.provider.moveSupply?.(slot.kind, amount.valueAsNumber, 'share');
+      });
+      share.setAttribute('aria-label', 'Dar ' + slot.label + ' ao parceiro próximo');
+      for (const button of [drop, share]) button.style.minHeight = '44px';
+      const deposit = makeSurvivalBtn('Guardar', 'store-' + slot.kind, () => {
+        if (amount.checkValidity()) this.provider.moveSupply?.(slot.kind, amount.valueAsNumber, 'deposit');
+      });
+      const withdraw = makeSurvivalBtn('Retirar', 'withdraw-' + slot.kind, () => {
+        if (amount.checkValidity()) this.provider.moveSupply?.(slot.kind, amount.valueAsNumber, 'withdraw');
+      });
+      const storageActions = document.createElement('div');
+      Object.assign(storageActions.style, { gridColumn: '1 / -1', display: 'flex', gap: '4px' });
+      storageActions.append(deposit, withdraw);
+      row.append(quantity, amount, drop, share, storageActions);
+      this.inventoryPanel.appendChild(row);
+      return { quantity, amount, drop, share, deposit, withdraw };
+    });
+    const construction = document.createElement('details');
+    construction.className = 'interface-details hud-construction';
+    construction.name = 'hud-utility';
+    const constructionLabel = document.createElement('summary');
+    constructionLabel.textContent = 'Construir';
+    const constructionActions = document.createElement('div');
+    constructionActions.className = 'construction-actions';
+    constructionActions.append(this.hudBuildWoodBtn, this.hudBuildScrapBtn, this.hudBuildTrapBtn, this.shelterControls);
+    constructionActions.prepend(this.hudResourcesStatusEl);
+    construction.append(constructionLabel, constructionActions);
+
+    this.utilityPanel = document.createElement('details');
+    this.utilityPanel.className = 'interface-details hud-settings';
+    this.utilityPanel.name = 'hud-utility';
+    const settingsLabel = document.createElement('summary');
+    settingsLabel.textContent = 'Opções';
+    this.utilityPanel.appendChild(settingsLabel);
+    for (const details of [construction, this.utilityPanel]) {
+      details.addEventListener('toggle', () => {
+        if (!details.open) return;
+        this.inventoryPanel.hidden = true;
+        inventoryButton.setAttribute('aria-expanded', 'false');
+      });
+    }
+
+    const desktopQuickHeal = document.createElement('div');
+    desktopQuickHeal.className = 'desktop-quick-heal';
+    desktopQuickHeal.appendChild(this.hudMedkitBtn);
+    this.hudSurvivalBarEl.append(inventoryButton, construction, this.utilityPanel, desktopQuickHeal, this.inventoryPanel);
+
+    this.hudStack = document.createElement('div');
+    this.hudStack.className = 'hud-stack';
+    this.hudStack.hidden = true;
+    this.hudStack.append(this.hudTopPanelEl, this.hudWeaponBarEl, this.hudSurvivalBarEl);
+    document.body.appendChild(this.hudStack);
 
     // 3. Barra de Dicas Táticas Inferior em DOM Nativo HiDPI
     this.hudHintBarEl = document.createElement('div');
@@ -2391,7 +2882,7 @@ export class GameScene extends Phaser.Scene {
     this.hudAttackBtn.innerHTML = `<span style="font-size:13px;font-weight:900;letter-spacing:0.5px;">ATACAR</span>`;
     Object.assign(this.hudAttackBtn.style, {
       position: 'fixed',
-      bottom: 'calc(200px + var(--safe-bottom))',
+      bottom: 'calc(clamp(72px, 17dvh, 132px) + var(--safe-bottom))',
       right: 'calc(24px + var(--safe-right))',
       width: '68px',
       height: '68px',
@@ -2410,29 +2901,40 @@ export class GameScene extends Phaser.Scene {
       userSelect: 'none',
       boxShadow: '0 6px 20px rgba(0, 0, 0, 0.65)',
     });
-    const setAttackActiveVisual = (active: boolean) => {
-      this.joystick.setAttackButtonHeld(active);
+    const setAttackActiveVisual = (active: boolean, cancelled = false) => {
+      this.joystick.setAttackButtonHeld(active, cancelled);
       this.hudAttackBtn.style.backgroundColor = active
         ? 'rgba(235, 84, 48, 0.98)'
         : 'rgba(180, 52, 34, 0.90)';
       this.hudAttackBtn.style.transform = active ? 'scale(0.94)' : 'scale(1)';
     };
+    let firePointer: number | null = null;
+    let dragX = 0;
+    let dragY = 0;
     this.hudAttackBtn.addEventListener('pointerdown', (ev) => {
+      if (firePointer !== null || ev.button !== 0) return;
       ev.stopPropagation();
       ev.preventDefault();
+      firePointer = ev.pointerId;
+      dragX = ev.clientX;
+      dragY = ev.clientY;
+      this.hudAttackBtn.setPointerCapture(ev.pointerId);
       setAttackActiveVisual(true);
     });
-    this.hudAttackBtn.addEventListener('pointerup', (ev) => {
-      ev.stopPropagation();
-      ev.preventDefault();
-      setAttackActiveVisual(false);
+    this.hudAttackBtn.addEventListener('pointermove', (ev) => {
+      if (ev.pointerId !== firePointer || this.joystick.getRightAimState().active) return;
+      const dx = ev.clientX - dragX;
+      const dy = ev.clientY - dragY;
+      if (Math.hypot(dx, dy) >= 12) this.joystick.setAimDirection(dx, dy);
     });
-    this.hudAttackBtn.addEventListener('pointercancel', () => {
-      setAttackActiveVisual(false);
-    });
-    this.hudAttackBtn.addEventListener('pointerleave', () => {
-      setAttackActiveVisual(false);
-    });
+    const finishAttack = (ev: PointerEvent) => {
+      if (ev.pointerId !== firePointer) return;
+      firePointer = null;
+      setAttackActiveVisual(false, ev.type !== 'pointerup');
+    };
+    this.hudAttackBtn.addEventListener('pointerup', finishAttack);
+    this.hudAttackBtn.addEventListener('pointercancel', finishAttack);
+    this.hudAttackBtn.addEventListener('lostpointercapture', finishAttack);
     document.body.appendChild(this.hudAttackBtn);
 
     // 3. Botão de Recarregar [R] (exibido quando com arma de fogo equipada)
@@ -2537,7 +3039,7 @@ export class GameScene extends Phaser.Scene {
     this.hudPingDangerBtn = document.createElement('button');
     this.hudPingDangerBtn.type = 'button';
     this.hudPingDangerBtn.setAttribute('data-testid', 'btn-ping-danger');
-    this.hudPingDangerBtn.textContent = 'ALERTA [Q]';
+    this.hudPingDangerBtn.textContent = 'Alerta';
     Object.assign(this.hudPingDangerBtn.style, {
       position: 'fixed',
       bottom: 'calc(280px + var(--safe-bottom))',
@@ -2640,6 +3142,7 @@ export class GameScene extends Phaser.Scene {
       isActive: boolean,
       hasWeapon: boolean
     ) => {
+      btn.setAttribute('aria-pressed', String(isActive));
       btn.style.backgroundColor = isActive
         ? 'rgba(34, 68, 48, 0.96)'
         : hasWeapon
@@ -2682,7 +3185,7 @@ export class GameScene extends Phaser.Scene {
     styleSlotBtn(this.hudSlot2Btn, activeSlot === 'slot2', Boolean(slot2Spec));
 
     if (equippedSpec.category === 'melee') {
-      this.hudAmmoStatusEl.textContent = `${equippedSpec.name.toUpperCase()} · SEM MUNIÇÃO · ALCANCE ${equippedSpec.rangePx}px`;
+      this.hudAmmoStatusEl.textContent = 'Corpo a corpo';
       this.hudAmmoStatusEl.style.color = '#9ed5ff';
       this.hudReloadBtn.style.display = 'none';
       return;
@@ -2710,7 +3213,7 @@ export class GameScene extends Phaser.Scene {
       this.hudAmmoStatusEl.textContent = `RECARREGANDO ${shortEquipped}... (${remSec}s) · ${ammoTypeLabel} [${reserve}]`;
       this.hudAmmoStatusEl.style.color = '#ffd56b';
     } else {
-      this.hudAmmoStatusEl.textContent = `${shortEquipped}: ${magAmmo}/${equippedSpec.magSize} (RES. ${reserve}) · ${ammoTypeLabel}`;
+      this.hudAmmoStatusEl.textContent = `${magAmmo}/${equippedSpec.magSize} · ${reserve} reserva`;
       this.hudAmmoStatusEl.style.color =
         magAmmo === 0 ? '#ff7a7a' : '#dce8e0';
     }
@@ -2728,9 +3231,11 @@ export class GameScene extends Phaser.Scene {
    * e o estado dos botões de fortificação, armadilha, cura e reparo (Etapa 4).
    */
   private updateSurvivalHudBar(
-    p: ReturnType<IWorldProvider['getRenderState']>['players'][number],
+    p: PlayerStateSnapshot,
+    players: readonly PlayerStateSnapshot[],
     structures: BuildableStructureSnapshot[],
-    showInGameHud: boolean
+    showInGameHud: boolean,
+    gameMode: GameMode
   ): void {
     const wood = p.wood ?? 0;
     const scrap = p.scrap ?? 0;
@@ -2754,20 +3259,57 @@ export class GameScene extends Phaser.Scene {
     const canWood = p.alive && canAffordStructure(p, 'wood_barricade');
     const canTrap = p.alive && canAffordStructure(p, 'spike_trap');
     const canScrap = p.alive && canAffordStructure(p, 'scrap_barricade');
-    const canHeal = p.alive && medkits > 0 && p.hp < p.maxHp;
+    const cloth = p.cloth ?? 0;
+    const canHeal = p.alive && (medkits > 0 || cloth > 0) && p.hp < p.maxHp;
+
+    const marker = structures.find((s) => s.kind === 'shelter_marker');
+    const storage = structures.find((s) => s.kind === 'storage' && s.hp > 0);
+    this.shelterControls.style.display = gameMode === 'exploration' ? 'flex' : 'none';
+    for (const [kind, button] of this.shelterButtons) {
+      button.hidden = kind === 'shelter_marker' ? Boolean(marker) : !marker || (kind === 'storage' && Boolean(storage));
+      button.disabled = !p.alive || !canAffordStructure(p, kind);
+    }
+
+    if (!this.inventoryPanel.hidden) {
+      const nearStorage = Boolean(storage && Math.hypot(storage.x - p.x, storage.y - p.y) <= 88 &&
+        hasLineOfSight(p.x, p.y, storage.x, storage.y, this.visionObstacles, true));
+      const partner = players.find((other) => other.id !== p.id && other.alive && other.connected);
+      const canShare = players.some((other) => other.id !== p.id && other.alive && other.connected &&
+        Math.hypot(other.x - p.x, other.y - p.y) <= 96 &&
+        hasLineOfSight(p.x, p.y, other.x, other.y, this.visionObstacles, true));
+      SUPPLY_SLOTS.forEach((slot, index) => {
+        const row = this.supplyRows[index];
+        const count = p[slot.field] ?? 0;
+        const stored = nearStorage ? storage?.supplies?.[slot.kind] ?? 0 : 0;
+        row.quantity.textContent = slot.label + ' ×' + count + (nearStorage ? ' · Caixa: ' + stored : '');
+        row.amount.max = String(Math.max(1, count, stored));
+        row.amount.disabled = !p.alive || count + stored === 0;
+        row.drop.disabled = !p.alive || count === 0;
+        row.deposit.hidden = row.withdraw.hidden = !nearStorage;
+        row.deposit.disabled = row.drop.disabled;
+        row.withdraw.disabled = !p.alive || stored === 0;
+        row.share.hidden = !partner;
+        row.share.disabled = row.drop.disabled || !canShare;
+        row.share.title = canShare ? '' : 'Aproxime-se do parceiro';
+        styleActionBtn(row.drop, !row.drop.disabled);
+        styleActionBtn(row.share, !row.share.disabled);
+      });
+    }
 
     styleActionBtn(this.hudBuildWoodBtn, canWood, '#d49b56');
     styleActionBtn(this.hudBuildTrapBtn, canTrap, '#e07a5f');
     styleActionBtn(this.hudBuildScrapBtn, canScrap, '#7cc0eb');
-    this.hudMedkitBtn.textContent = `[H] CURAR (${medkits})`;
+    const healShortcut = this.touchControls.matches ? '' : '[H] ';
+    this.hudMedkitBtn.textContent = healShortcut + (medkits > 0 ? `CURAR (${medkits})` : `PANO (${cloth})`);
+    this.hudMedkitBtn.disabled = !canHeal;
     styleActionBtn(this.hudMedkitBtn, canHeal, '#58e88a');
 
     // Verifica se há fortificação danificada dentro de REPAIR_RADIUS_PX
     let damagedNearby: BuildableStructureSnapshot | null = null;
-    let bestDist = BALANCE.STRUCTURES.REPAIR_RADIUS_PX;
+    let bestDist: number = BALANCE.STRUCTURES.REPAIR_RADIUS_PX;
     if (p.alive) {
       for (const s of structures) {
-        if (s.hp > 0 && s.hp < s.maxHp) {
+        if (s.kind !== 'map_door' && s.hp > 0 && s.hp < s.maxHp) {
           const d = Math.hypot(s.x - p.x, s.y - p.y);
           if (d <= bestDist) {
             bestDist = d;
@@ -2782,7 +3324,9 @@ export class GameScene extends Phaser.Scene {
       damagedNearby &&
       wood >= BALANCE.STRUCTURES.REPAIR_WOOD_COST
     ) {
-      this.hudRepairBtn.textContent = `REPARAR ${damagedNearby.label.toUpperCase()} [X] (1M)`;
+      const tool = (p.repairTools ?? 0) > 0 &&
+        damagedNearby.maxHp - damagedNearby.hp > BALANCE.STRUCTURES.REPAIR_HP_AMOUNT;
+      this.hudRepairBtn.textContent = `REPARAR ${damagedNearby.label.toUpperCase()} [X] (1M${tool ? ' + ferramenta' : ''})`;
       this.hudRepairBtn.style.display = 'block';
     } else {
       this.hudRepairBtn.style.display = 'none';
@@ -2807,6 +3351,14 @@ export class GameScene extends Phaser.Scene {
 
     // 0. Estruturas construídas pela dupla (Barricadas e Armadilhas de Espinhos — Etapa 4)
     for (const s of structures) {
+      if (s.kind === 'map_door' || s.kind === 'shelter_door') {
+        if (s.hp > 0 && localPlayer.alive && Math.abs(s.x - localPlayer.x) < s.radius &&
+            Math.abs(s.y - localPlayer.y) <= 32) {
+          nearestDist = -1;
+          nearestActionLabel = s.open ? 'FECHAR PORTA [E]' : 'ABRIR PORTA [E]';
+        }
+        continue;
+      }
       const col = Math.min(
         FOG_GRID_COLS - 1,
         Math.max(0, Math.floor(s.x / cellSize))
@@ -2819,7 +3371,8 @@ export class GameScene extends Phaser.Scene {
       const isCurrentlySeen = this.isWorldPointVisibleToLocalPlayer(
         s.x,
         s.y,
-        s.radius
+        s.radius,
+        localPlayer
       );
 
       if (!isCurrentlySeen && !isCellExplored) {
@@ -2827,7 +3380,21 @@ export class GameScene extends Phaser.Scene {
       }
 
       const alpha = isCurrentlySeen ? 0.96 : 0.48;
-      if (s.kind === 'wood_barricade') {
+      if (s.kind === 'shelter_wall') {
+        if (this.world3D?.available) continue;
+        const dx = Math.sin(s.rotation) * s.radius;
+        const dy = Math.cos(s.rotation) * s.radius;
+        this.lootGraphics.lineStyle(9, 0x986947, alpha);
+        this.lootGraphics.lineBetween(s.x - dx, s.y - dy, s.x + dx, s.y + dy);
+      } else if (s.kind === 'storage') {
+        this.lootGraphics.fillStyle(0xb8874d, alpha);
+        this.lootGraphics.fillRoundedRect(s.x - 16, s.y - 13, 32, 26, 4);
+        this.lootGraphics.lineStyle(3, 0x503e31, alpha);
+        this.lootGraphics.lineBetween(s.x - 16, s.y - 2, s.x + 16, s.y - 2);
+      } else if (s.kind === 'shelter_marker' || s.kind === 'slow_trap') {
+        this.lootGraphics.fillStyle(s.kind === 'shelter_marker' ? 0x75c380 : 0x6595bc, alpha);
+        this.lootGraphics.fillCircle(s.x, s.y, s.radius);
+      } else if (s.kind === 'wood_barricade') {
         this.lootGraphics.fillStyle(0x6e4720, alpha);
         this.lootGraphics.fillCircle(s.x, s.y, s.radius);
         this.lootGraphics.lineStyle(2.5, 0xd49b56, alpha);
@@ -2896,7 +3463,8 @@ export class GameScene extends Phaser.Scene {
       const isCurrentlySeen = this.isWorldPointVisibleToLocalPlayer(
         c.x,
         c.y,
-        22
+        22,
+        localPlayer
       );
 
       if (!isCurrentlySeen && !isCellExplored) {
@@ -2904,30 +3472,7 @@ export class GameScene extends Phaser.Scene {
       }
 
       const alpha = isCurrentlySeen ? 0.95 : 0.45;
-      const fillHex = c.opened
-        ? 0x262e29
-        : c.kind === 'weapon_case'
-          ? 0x3b4d63
-          : c.kind === 'ammo_box'
-            ? 0x3b5938
-            : 0x5c4728;
-      const borderHex = c.opened
-        ? 0x4b5950
-        : c.kind === 'weapon_case'
-          ? 0x68b5ff
-          : c.kind === 'ammo_box'
-            ? 0x76e088
-            : 0xffc252;
-
-      this.lootGraphics.fillStyle(fillHex, alpha);
-      this.lootGraphics.fillRoundedRect(c.x - 16, c.y - 12, 32, 24, 4);
-      this.lootGraphics.lineStyle(2, borderHex, alpha);
-      this.lootGraphics.strokeRoundedRect(c.x - 16, c.y - 12, 32, 24, 4);
-
-      if (!c.opened && isCurrentlySeen) {
-        this.lootGraphics.lineStyle(1.2, borderHex, 0.35);
-        this.lootGraphics.strokeCircle(c.x, c.y, 26);
-      }
+      if (!this.world3D?.available || c.label !== 'Casa') drawLootContainer(this.lootGraphics, c, alpha);
 
       if (!c.opened && localPlayer.alive) {
         const d = Math.hypot(c.x - localPlayer.x, c.y - localPlayer.y);
@@ -2943,33 +3488,14 @@ export class GameScene extends Phaser.Scene {
       const isCurrentlySeen = this.isWorldPointVisibleToLocalPlayer(
         item.x,
         item.y,
-        14
+        14,
+        localPlayer
       );
       if (!isCurrentlySeen) {
         continue;
       }
 
-      if (item.kind === 'weapon') {
-        const isMelee = item.weaponId === 'bat' || item.weaponId === 'knife';
-        const ringColor = isMelee ? 0x78c4ff : 0xffb74d;
-        this.lootGraphics.fillStyle(0x16211b, 0.88);
-        this.lootGraphics.fillCircle(item.x, item.y, 13);
-        this.lootGraphics.lineStyle(2.2, ringColor, 0.95);
-        this.lootGraphics.strokeCircle(item.x, item.y, 13);
-        this.lootGraphics.fillStyle(ringColor, 0.95);
-        this.lootGraphics.fillRoundedRect(item.x - 7, item.y - 2.5, 14, 5, 2);
-      } else {
-        const ammoColor =
-          item.ammoType === 'shells'
-            ? 0xff7043
-            : item.ammoType === 'heavy'
-              ? 0xffca28
-              : 0x66bb6a;
-        this.lootGraphics.fillStyle(0x142018, 0.88);
-        this.lootGraphics.fillRoundedRect(item.x - 9, item.y - 7, 18, 14, 3);
-        this.lootGraphics.lineStyle(1.8, ammoColor, 0.95);
-        this.lootGraphics.strokeRoundedRect(item.x - 9, item.y - 7, 18, 14, 3);
-      }
+      drawLootItem(this.lootGraphics, item);
 
       if (localPlayer.alive) {
         const d = Math.hypot(item.x - localPlayer.x, item.y - localPlayer.y);
@@ -2993,9 +3519,7 @@ export class GameScene extends Phaser.Scene {
       return;
     }
     const isAuto = this.localAimMode === 'auto';
-    this.hudAimModeBtn.textContent = isAuto
-      ? 'DISPARO: AUTOMÁTICO NO CONE (M)'
-      : 'DISPARO: MANUAL · BOTÃO/CLIQUE (M)';
+    this.hudAimModeBtn.textContent = isAuto ? 'Mira: automática' : 'Mira: manual';
     Object.assign(this.hudAimModeBtn.style, {
       backgroundColor: isAuto ? 'rgba(24, 52, 35, 0.92)' : 'rgba(64, 34, 16, 0.92)',
       border: isAuto ? '1px solid #52c478' : '1px solid #ff9138',
@@ -3004,7 +3528,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawJoystickOverlay(): void {
-    if (this.endGameModal.isVisible() || this.lobbyOverlay.isVisible()) {
+    if (!this.touchControls.matches || this.endGameModal.isVisible() || this.lobbyOverlay.isVisible()) {
       this.joystickLayerEl.style.display = 'none';
       return;
     }

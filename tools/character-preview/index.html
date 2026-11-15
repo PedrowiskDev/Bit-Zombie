@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bit-Zombie · Prévia dos personagens</title>
+<style>
+  :root { color-scheme: dark; font: 16px system-ui, sans-serif; background: #141913; color: #e7e4d5; }
+  body { max-width: 840px; padding: 16px; margin: auto; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+  h1 { font-size: clamp(1.15rem, 4vw, 1.65rem); }
+  button { min-height: 42px; background: #252d24; color: inherit; border: 1px solid #77765b; border-radius: 7px; padding: 6px 12px; cursor: pointer; }
+  select { min-height: 42px; font: inherit; }
+  #motion:not([hidden]) { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  main { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  figure { margin: 0; background: #22291f; border: 1px solid #41493a; border-radius: 8px; overflow: hidden; }
+  canvas { width: 100%; height: clamp(142px, 28vw, 250px); display: block; }
+  figcaption { padding: 9px; font-size: .875rem; }
+</style>
+<header>
+  <h1>Prévia dos personagens</h1>
+  <div>
+    <button id="mode" aria-pressed="false">Animações</button>
+    <button id="zoom" aria-pressed="false">Ampliar</button>
+    <button id="rotate">Girar 45°</button>
+  </div>
+</header>
+<div id="motion" hidden>
+  <label for="clip">Movimento</label>
+  <select id="clip">
+    <option value="idle">Parado</option>
+    <option value="walk">Andar</option>
+    <option value="run">Correr</option>
+    <option value="attack">Ataque</option>
+    <option value="shoot">Disparo do sobrevivente</option>
+    <option value="reload">Recarga do sobrevivente</option>
+    <option value="hit">Ferimento</option>
+    <option value="fall">Queda / morte</option>
+    <option value="revive">Reviver sobrevivente</option>
+  </select>
+  <button id="pause">Pausar</button>
+  <button id="replay">Repetir</button>
+</div>
+<p id="status" role="status">Carregando os modelos…</p>
+<main id="grid"></main>
+<script type="module">
+  import * as THREE from 'three';
+  import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+  import { IsometricView } from '../../packages/client/src/render/IsometricView.ts';
+
+  const tiles = [
+    ['survivor-512', 'Sobrevivente · 512 px'],
+    ['survivor-1024', 'Sobrevivente · 1024 px'],
+    ['zombie-512', 'Zumbi normal · 512 px'],
+    ['zombie-1024', 'Zumbi normal · 1024 px'],
+  ];
+  const animatedTiles = [
+    ['survivor-rig', 'Sobrevivente masculino'],
+    ['survivor-female-rig', 'Sobrevivente feminina'],
+    ['zombie-rig', 'Zumbi normal'],
+    ['zombie-fast-rig', 'Corredor'],
+    ['zombie-spitter-rig', 'Cuspidor'],
+    ['zombie-demolisher-rig', 'Demolidor'],
+    ['zombie-brute-rig', 'Tank'],
+  ];
+  const grid = document.querySelector('#grid');
+  const status = document.querySelector('#status');
+  const zoom = document.querySelector('#zoom');
+  const mode = document.querySelector('#mode');
+  const motion = document.querySelector('#motion');
+  const clipSelect = document.querySelector('#clip');
+  const pause = document.querySelector('#pause');
+  const gameView = new IsometricView().update({ x: 0, y: 0 }, 960, 540, 0);
+  const loops = new Set(['idle', 'walk', 'run']);
+  let enlarged = false;
+  let angle = -3 * Math.PI / 4;
+  let animated = false;
+  let paused = false;
+
+  async function start() {
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 2000);
+    const rendererSize = new THREE.Vector2();
+    const offset = gameView.cameraOffset(900);
+    const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+    const entries = [...tiles, ...animatedTiles];
+    const scenes = await Promise.all(entries.map(async ([id, label]) => {
+      const figure = document.createElement('figure');
+      const canvas = document.createElement('canvas');
+      canvas.setAttribute('role', 'img');
+      canvas.setAttribute('aria-label', label);
+      const caption = document.createElement('figcaption');
+      caption.textContent = label;
+      const rigged = id.endsWith('-rig');
+      figure.hidden = rigged;
+      figure.append(canvas, caption);
+      grid.append(figure);
+
+      const file = rigged ? `/models/${id}.glb` : `./assets/${id}.glb`;
+      const { scene: model, animations } = await loader.loadAsync(file);
+      const box = new THREE.Box3().setFromObject(model, true);
+      const height = box.max.y - box.min.y;
+      if (Math.abs(box.min.y) > 0.01 || Math.abs(height - 38) > 0.01) {
+        throw new Error(`Pivô ou altura inesperada em ${id}`);
+      }
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x384438);
+      scene.add(model, new THREE.HemisphereLight(0xc6dae2, 0x50402c, 2));
+      const sun = new THREE.DirectionalLight(0xffe5c7, 2);
+      sun.position.set(-400, 800, -300);
+      scene.add(sun);
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(13.5, 14, 48),
+        new THREE.MeshBasicMaterial({ color: 0xb3a173 }),
+      );
+      ring.rotation.x = -Math.PI / 2;
+      scene.add(ring);
+      const mixer = rigged ? new THREE.AnimationMixer(model) : undefined;
+      return { scene, model, canvas, figure, caption, mixer, animations, id, label };
+    }));
+
+    function render() {
+      const pixelScale = renderer.getPixelRatio();
+      const unitsPerPixel = gameView.ground.width / 960 / (enlarged ? 2.5 : 1);
+      const targetY = enlarged ? 16 : 10;
+      camera.position.set(offset.x, offset.y + targetY, offset.z);
+      camera.lookAt(0, targetY, 0);
+      for (const { scene, model, canvas, figure } of scenes) {
+        if (figure.hidden) continue;
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+        const pixelWidth = Math.round(width * pixelScale);
+        const pixelHeight = Math.round(height * pixelScale);
+        if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+          canvas.width = pixelWidth;
+          canvas.height = pixelHeight;
+        }
+        renderer.getSize(rendererSize);
+        if (rendererSize.x !== width || rendererSize.y !== height) renderer.setSize(width, height, false);
+        camera.left = -width * unitsPerPixel / 2;
+        camera.right = -camera.left;
+        camera.top = height * unitsPerPixel / 2;
+        camera.bottom = -camera.top;
+        camera.updateProjectionMatrix();
+        model.rotation.y = angle;
+        renderer.render(scene, camera);
+        canvas.getContext('2d').drawImage(renderer.domElement, 0, 0, canvas.width, canvas.height);
+      }
+    }
+
+    let frame;
+    let previousTime;
+    function animate(now) {
+      frame = undefined;
+      const dt = previousTime === undefined ? 0 : Math.min((now - previousTime) / 1000, 0.05);
+      previousTime = now;
+      for (const { mixer } of scenes) mixer?.update(dt);
+      render();
+      frame = requestAnimationFrame(animate);
+    }
+
+    function updatePlayback() {
+      if (animated && !paused) {
+        if (frame === undefined) frame = requestAnimationFrame(animate);
+      } else if (frame !== undefined) {
+        cancelAnimationFrame(frame);
+        frame = undefined;
+        previousTime = undefined;
+      }
+      render();
+    }
+
+    function selectClip() {
+      const chosen = clipSelect.value;
+      for (const { mixer, animations, id, caption, label } of scenes) {
+        if (!mixer) continue;
+        const zombie = id.startsWith('zombie');
+        const waits = zombie && ['shoot', 'reload', 'revive'].includes(chosen);
+        const name = waits ? 'idle' : chosen === 'attack' ? (zombie ? 'lunge' : 'melee') : chosen;
+        mixer.stopAllAction();
+        const clip = THREE.AnimationClip.findByName(animations, name);
+        if (!clip) throw new Error(`Clipe ausente: ${id}/${name}`);
+        const action = mixer.clipAction(clip).reset();
+        action.setLoop(loops.has(name) ? THREE.LoopRepeat : THREE.LoopOnce, loops.has(name) ? Infinity : 1);
+        action.clampWhenFinished = !loops.has(name);
+        action.play();
+        mixer.update(0);
+        caption.textContent = waits ? `${label} · parado` : label;
+      }
+      render();
+    }
+
+    mode.addEventListener('click', () => {
+      animated = !animated;
+      mode.setAttribute('aria-pressed', String(animated));
+      mode.textContent = animated ? 'Comparar texturas' : 'Animações';
+      motion.hidden = !animated;
+      for (const { figure, mixer } of scenes) figure.hidden = animated !== Boolean(mixer);
+      status.textContent = animated
+        ? 'Esqueletos piloto com texturas de 512 px.'
+        : 'Câmera isométrica do jogo. Compare as texturas lado a lado.';
+      if (animated) selectClip();
+      updatePlayback();
+    });
+    clipSelect.addEventListener('change', selectClip);
+    document.querySelector('#replay').addEventListener('click', selectClip);
+    pause.addEventListener('click', () => {
+      paused = !paused;
+      pause.textContent = paused ? 'Continuar' : 'Pausar';
+      updatePlayback();
+    });
+
+    zoom.addEventListener('click', () => {
+      enlarged = !enlarged;
+      zoom.setAttribute('aria-pressed', String(enlarged));
+      zoom.textContent = enlarged ? 'Escala do jogo' : 'Ampliar';
+      render();
+    });
+    document.querySelector('#rotate').addEventListener('click', () => {
+      angle += Math.PI / 4;
+      render();
+    });
+    window.addEventListener('resize', render);
+    render();
+    status.textContent = 'Câmera isométrica do jogo. Compare as texturas lado a lado.';
+  }
+
+  start().catch(error => {
+    console.error(error);
+    status.textContent = `Falha na prévia: ${error.message}`;
+  });
+</script>
+</html>

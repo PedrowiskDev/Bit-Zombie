@@ -44,7 +44,8 @@ export class OfflineProvider implements IWorldProvider {
   constructor(
     localPlayerId = 'player-1',
     seed: number = BALANCE.SIMULATION.DEFAULT_SEED,
-    gameMode: GameMode = 'rounds'
+    gameMode: GameMode = 'rounds',
+    private readonly onStepMeasured?: (elapsedMs: number) => void
   ) {
     this.localPlayerId = localPlayerId;
     this.currentSeed = seed;
@@ -125,6 +126,13 @@ export class OfflineProvider implements IWorldProvider {
   }
 
   /** Repara a fortificação danificada mais próxima gastando 1 Madeira (Etapa 4) */
+  moveSupply(kind: import('@zombie-coop/shared').SupplyKind, amount: number, action: 'drop' | 'share' | 'deposit' | 'withdraw'): void {
+    if (this.sim.moveSupply(this.localPlayerId, kind, amount, action)) {
+      this.currSnapshot = this.sim.getSnapshot();
+      this.prevSnapshot = this.currSnapshot;
+    }
+  }
+
   repairStructure(): void {
     if (this.sim.repairNearestStructure(this.localPlayerId)) {
       this.currSnapshot = this.sim.getSnapshot();
@@ -190,7 +198,7 @@ export class OfflineProvider implements IWorldProvider {
 
   /** Método auxiliar para testar posicionamento de zumbis e visão na Etapa 2 */
   spawnZombieForTest(
-    kind: 'common' | 'fast' | 'brute',
+    kind: import('@zombie-coop/shared').ZombieKind,
     x: number,
     y: number
   ): number | null {
@@ -235,6 +243,7 @@ export class OfflineProvider implements IWorldProvider {
       this.prevSnapshot = this.currSnapshot;
 
       const seq = this.nextSeq++;
+      const stepStart = this.onStepMeasured ? performance.now() : 0;
       this.sim.step(tickMs, {
         [this.localPlayerId]: {
           seq,
@@ -252,6 +261,7 @@ export class OfflineProvider implements IWorldProvider {
           useMedkit: !consumedOneShotActions ? aimInput?.useMedkit : undefined,
         },
       });
+      this.onStepMeasured?.(performance.now() - stepStart);
       consumedOneShotActions = true;
 
       this.currSnapshot = this.sim.getSnapshot();

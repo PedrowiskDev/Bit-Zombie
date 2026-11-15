@@ -1,6 +1,6 @@
 # Zombie Survival Coop — Fase 1
 
-Protótipo jogável de sobrevivência zumbi cooperativo top-down 2D para **1 a 2 jogadores** pela internet, em **PC ou celular (Retrato e Paisagem)**, direto no navegador e sem instalação.
+Protótipo jogável de sobrevivência zumbi cooperativo com câmera superior para **1 jogador offline ou 2 a 6 jogadores** pela internet, em **PC ou celular (Retrato e Paisagem)**, direto no navegador e sem instalação.
 
 ---
 
@@ -11,9 +11,9 @@ Protótipo jogável de sobrevivência zumbi cooperativo top-down 2D para **1 a 2
   - Passo fixo de **20 Hz (`50 ms`)**, RNG determinístico (`Mulberry32`), grade espacial (`SpatialHashGrid`), reconciliação por `seq`, interpolação de entidades remotas (`100 ms`), catálogo de upgrades (`UPGRADE_CATALOG`) e balanceamento centralizado em `packages/shared/src/config/balance.ts`.
 - **`packages/server` (`@zombie-coop/server`)**:
   - Servidor autoritativo Node.js + Express + Colyseus `0.16.22` (`@colyseus/schema` `3.0.76`) servindo HTTP, Vite e WebSocket na mesma porta (`PORT || 3000`).
-  - Salas privadas para até 2 jogadores com códigos de 5 caracteres sem `O, 0, I, 1`, validação estrita de input (`PlayerInputQueue`, vetor limitado a `1`, fila máx. `8`, rate-limit) e janela de **20 segundos** de reconexão (jogador desconectado permanece parado e invulnerável antes de contar como morto).
+  - Salas privadas para até 6 jogadores com códigos de 5 caracteres sem `O, 0, I, 1`, validação estrita de input (`PlayerInputQueue`, vetor limitado a `1`, fila máx. `8`, rate-limit) e janela de **20 segundos** de reconexão (jogador desconectado permanece parado e invulnerável antes de contar como morto).
 - **`packages/client` (`@zombie-coop/client`)**:
-  - Renderizador Phaser `3.90.0` desacoplado da origem dos dados via `IWorldProvider` (`OfflineProvider` e `OnlineProvider` com `getStateCallbacks(room)` de `"colyseus.js"`).
+  - Mundo low-poly em Three.js e efeitos e névoa em Phaser `3.90.0`, desacoplados da origem dos dados via `IWorldProvider` (`OfflineProvider` e `OnlineProvider` com `getStateCallbacks(room)` de `"colyseus.js"`).
   - Resolução adaptativa nativa que preenche **100% da tela de cada aparelho** (sem tarjas pretas em `16:9`, `19.5:9`, `20:9`, `4:3`, Retrato ou Paisagem), mantendo a diagonal lógica constante ($\approx 1101{,}4\text{ px}$) para que zumbis nasçam sempre fora da tela (`580..760 px`).
 
 ---
@@ -41,6 +41,8 @@ npm run dev
 
 ## Controles (PC e Mobile)
 
+- **Pausa no modo offline**: botão **Pausar** ou tecla **Esc**.
+
 - **Movimento (8 direções normalizadas / analógico)**:
   - **PC**: `WASD` ou Setas direcionais.
   - **Mobile / Touch**: Toque e arraste na **metade esquerda da tela** (`MOVER`).
@@ -52,6 +54,7 @@ npm run dev
 
 ## Parâmetros de Diagnóstico na URL
 
+- `?renderer=2d`: força a renderização original para comparação. O modo 2D também é usado quando WebGL2 não está disponível.
 - `?debug`: exibe o painel de telemetria em tempo real (FPS, ping/RTT, tick, `lastProcessedSeq`, inputs pendentes, zumbis vivos, banda `B/s` e modo de mira).
 - `?lag=150`: aplica atraso artificial de `150 ms` no envio e recebimento do cliente para inspecionar a predição local e a interpolação de entidades remotas.
 - `?seed=12345`: define a seed determinística inicial para partidas no modo Solo/Offline.

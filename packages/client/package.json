@@ -11,6 +11,10 @@
     "@colyseus/schema": "3.0.76",
     "@zombie-coop/shared": "0.1.0",
     "colyseus.js": "0.16.22",
-    "phaser": "3.90.0"
+    "phaser": "3.90.0",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.187.0"
   }
 }

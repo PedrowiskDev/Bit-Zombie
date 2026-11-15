@@ -19,8 +19,8 @@ export interface LobbyActions {
 /**
  * Menu Principal e Lobby de Sala Privada (Etapa 1 do Novo Plano + Etapas 4 e 5).
  * - Permite escolher o Modo de Jogo:
- *   1. Sobrevivência por Rodadas (`rounds`)
- *   2. Exploração e Abrigo (`exploration`)
+ *   1. Rodadas (`rounds`)
+ *   2. Exploração (`exploration`)
  * - Permite escolher/sortear a Seed do mapa-base para reproduzir exatamente a mesma geografia nos dois modos.
  * - Dentro de cada modo: Solo (Offline), Criar Sala Privada (2 jogadores) e Entrar por código de 5 caracteres.
  * - O segundo jogador recebe e visualiza o Modo de Jogo e a Seed escolhidos pelo criador no lobby.
@@ -36,8 +36,7 @@ export class LobbyOverlay {
   private readonly lobbyModeBadge: HTMLSpanElement;
   private readonly lobbySeedBadge: HTMLSpanElement;
   private readonly phaseStatusText: HTMLParagraphElement;
-  private readonly slotBlueEl: HTMLDivElement;
-  private readonly slotOrangeEl: HTMLDivElement;
+  private readonly slotCards: HTMLDivElement[];
   private readonly readyBtn: HTMLButtonElement;
   private readonly aimAutoBtn: HTMLButtonElement;
   private readonly aimManualBtn: HTMLButtonElement;
@@ -84,19 +83,12 @@ export class LobbyOverlay {
       boxShadow: '0 20px 48px rgba(0, 0, 0, 0.75)',
     });
 
-    // Emblema SVG de título
-    const header = document.createElement('div');
-    header.style.textAlign = 'center';
-    header.style.marginBottom = '12px';
-    header.innerHTML = `
-      <svg viewBox="0 0 360 60" width="100%" height="50" aria-hidden="true" style="display:block;margin:0 auto 2px auto;">
-        <rect x="6" y="6" width="348" height="48" rx="6" fill="#18211b" stroke="#3b5243" stroke-width="1.5"/>
-        <circle cx="34" cy="30" r="11" fill="#2b95ff" />
-        <circle cx="326" cy="30" r="11" fill="#ff7b29" />
-        <text x="180" y="29" text-anchor="middle" fill="#e6ece8" font-family="monospace" font-weight="800" font-size="17" letter-spacing="2">ZOMBIE SURVIVAL</text>
-        <text x="180" y="45" text-anchor="middle" fill="#63cf88" font-family="monospace" font-weight="700" font-size="10" letter-spacing="2.5">COOP · RODADAS &amp; EXPLORAÇÃO</text>
-      </svg>
-    `;
+    panel.className = 'interface-card lobby-card';
+    const header = document.createElement('header');
+    header.className = 'lobby-heading';
+    const title = document.createElement('h1');
+    title.textContent = 'BIT-ZOMBIE';
+    header.appendChild(title);
 
     // Banner de erro de rede / validação
     this.errorBanner = document.createElement('div');
@@ -116,8 +108,9 @@ export class LobbyOverlay {
 
     // 1. Sub-view do Menu Inicial
     this.menuView = document.createElement('div');
+    this.menuView.className = 'lobby-menu';
 
-    // Seletor de Modo de Jogo (Etapa 1: Sobrevivência por Rodadas vs Exploração e Abrigo)
+    // Seletor de Modo de Jogo (Etapa 1: Rodadas vs Exploração)
     const gameModeBox = document.createElement('div');
     Object.assign(gameModeBox.style, {
       backgroundColor: '#161e19',
@@ -128,7 +121,7 @@ export class LobbyOverlay {
     });
 
     const gameModeTitle = document.createElement('div');
-    gameModeTitle.textContent = 'MODO DE JOGO (MESMO MAPA-BASE PELA SEED)';
+    gameModeTitle.textContent = 'Modo de jogo';
     Object.assign(gameModeTitle.style, {
       fontSize: '11px',
       fontWeight: '700',
@@ -148,7 +141,7 @@ export class LobbyOverlay {
 
     this.modeRoundsBtn = document.createElement('button');
     this.modeRoundsBtn.type = 'button';
-    this.modeRoundsBtn.textContent = 'Sobrevivência por Rodadas';
+    this.modeRoundsBtn.textContent = 'Rodadas';
     this.modeRoundsBtn.setAttribute('data-testid', 'btn-mode-rounds');
     this.modeRoundsBtn.addEventListener('click', () => {
       this.modeRoundsBtn.blur();
@@ -158,7 +151,7 @@ export class LobbyOverlay {
 
     this.modeExplorationBtn = document.createElement('button');
     this.modeExplorationBtn.type = 'button';
-    this.modeExplorationBtn.textContent = 'Exploração e Abrigo';
+    this.modeExplorationBtn.textContent = 'Exploração';
     this.modeExplorationBtn.setAttribute('data-testid', 'btn-mode-exploration');
     this.modeExplorationBtn.addEventListener('click', () => {
       this.modeExplorationBtn.blur();
@@ -242,7 +235,8 @@ export class LobbyOverlay {
     });
 
     seedRow.append(seedLabel, this.seedInput, randomSeedBtn);
-    gameModeBox.append(gameModeTitle, gameModeBtnRow, this.modeSummaryText, seedRow);
+    gameModeBox.className = 'mode-selection';
+    gameModeBox.append(gameModeTitle, gameModeBtnRow, this.modeSummaryText);
     this.refreshGameModeStyles();
 
     // Seletor de Modo de Disparo (Automático vs Manual no lado direito)
@@ -256,7 +250,7 @@ export class LobbyOverlay {
     });
 
     const aimTitle = document.createElement('div');
-    aimTitle.textContent = 'MODO DE DISPARO (TAMBÉM ALTERNÁVEL EM JOGO)';
+    aimTitle.textContent = 'Modo de disparo';
     Object.assign(aimTitle.style, {
       fontSize: '11px',
       fontWeight: '700',
@@ -275,7 +269,7 @@ export class LobbyOverlay {
 
     this.aimAutoBtn = document.createElement('button');
     this.aimAutoBtn.type = 'button';
-    this.aimAutoBtn.textContent = 'Automático (Padrão)';
+    this.aimAutoBtn.textContent = 'Automático';
     this.aimAutoBtn.setAttribute('data-testid', 'btn-aim-mode-auto');
     this.aimAutoBtn.addEventListener('click', () => {
       this.aimAutoBtn.blur();
@@ -285,7 +279,7 @@ export class LobbyOverlay {
 
     this.aimManualBtn = document.createElement('button');
     this.aimManualBtn.type = 'button';
-    this.aimManualBtn.textContent = 'Manual (Lado Direito)';
+    this.aimManualBtn.textContent = 'Manual';
     this.aimManualBtn.setAttribute('data-testid', 'btn-aim-mode-manual');
     this.aimManualBtn.addEventListener('click', () => {
       this.aimManualBtn.blur();
@@ -299,7 +293,7 @@ export class LobbyOverlay {
 
     const offlineBtn = document.createElement('button');
     offlineBtn.type = 'button';
-    offlineBtn.textContent = 'Jogar Solo (Offline)';
+    offlineBtn.textContent = 'Jogar solo';
     offlineBtn.setAttribute('data-start', 'true');
     offlineBtn.setAttribute('data-testid', 'btn-play-offline');
     Object.assign(offlineBtn.style, {
@@ -322,7 +316,7 @@ export class LobbyOverlay {
 
     const createRoomBtn = document.createElement('button');
     createRoomBtn.type = 'button';
-    createRoomBtn.textContent = 'Criar Sala Privada (Coop 2 Jogadores)';
+    createRoomBtn.textContent = 'Criar sala · até 6';
     createRoomBtn.setAttribute('data-testid', 'btn-create-room');
     Object.assign(createRoomBtn.style, {
       width: '100%',
@@ -356,7 +350,7 @@ export class LobbyOverlay {
 
     const codeLabel = document.createElement('label');
     codeLabel.htmlFor = 'room-code-input';
-    codeLabel.textContent = 'Código da Sala (5 caracteres)';
+    codeLabel.textContent = 'Código de convite';
     Object.assign(codeLabel.style, {
       position: 'absolute',
       width: '1px',
@@ -388,7 +382,7 @@ export class LobbyOverlay {
 
     const joinBtn = document.createElement('button');
     joinBtn.type = 'button';
-    joinBtn.textContent = 'Entrar por Código';
+    joinBtn.textContent = 'Entrar';
     joinBtn.setAttribute('data-testid', 'btn-join-room');
     Object.assign(joinBtn.style, {
       padding: '9px 14px',
@@ -409,24 +403,16 @@ export class LobbyOverlay {
 
     joinForm.append(codeLabel, this.codeInput, joinBtn);
 
-    const footerHint = document.createElement('p');
-    footerHint.textContent =
-      'Esquerda: Mover · Direita: Mirar/Atirar · Tecla M: Mira · Tecla N: Antecipar Rodada';
-    Object.assign(footerHint.style, {
-      margin: '10px 0 0 0',
-      fontSize: '11px',
-      color: '#899c90',
-      textAlign: 'center',
-    });
+    const settings = document.createElement('details');
+    settings.className = 'interface-details';
+    const settingsLabel = document.createElement('summary');
+    settingsLabel.textContent = 'Configurar mira e mapa';
+    settings.append(settingsLabel, aimModeBox, seedRow);
 
-    this.menuView.append(
-      gameModeBox,
-      aimModeBox,
-      offlineBtn,
-      createRoomBtn,
-      joinForm,
-      footerHint
-    );
+    const actionRow = document.createElement('div');
+    actionRow.className = 'lobby-actions';
+    actionRow.append(offlineBtn, createRoomBtn);
+    this.menuView.append(gameModeBox, actionRow, joinForm, settings);
 
     // 2. Sub-view da Sala Privada (Lobby & Contagem)
     this.roomView = document.createElement('div');
@@ -504,7 +490,7 @@ export class LobbyOverlay {
 
     this.phaseStatusText = document.createElement('p');
     this.phaseStatusText.setAttribute('data-testid', 'lobby-phase-status');
-    this.phaseStatusText.textContent = 'Aguardando os 2 jogadores marcarem pronto...';
+    this.phaseStatusText.textContent = 'Aguardando jogadores...';
     Object.assign(this.phaseStatusText.style, {
       margin: '0 0 12px 0',
       fontSize: '13px',
@@ -521,9 +507,9 @@ export class LobbyOverlay {
       marginBottom: '14px',
     });
 
-    this.slotBlueEl = this.createPlayerSlotCard('JOGADOR 1 (AZUL)', '#2b95ff');
-    this.slotOrangeEl = this.createPlayerSlotCard('JOGADOR 2 (LARANJA)', '#ff7b29');
-    slotsWrap.append(this.slotBlueEl, this.slotOrangeEl);
+    this.slotCards = BALANCE.NETWORK.PLAYER_COLORS.map((color, index) =>
+      this.createPlayerSlotCard('JOGADOR ' + (index + 1), '#' + color.toString(16).padStart(6, '0')));
+    slotsWrap.append(...this.slotCards);
 
     const roomButtonsRow = document.createElement('div');
     Object.assign(roomButtonsRow.style, {
@@ -638,8 +624,8 @@ export class LobbyOverlay {
     this.modeExplorationBtn.setAttribute('aria-pressed', String(!isRounds));
 
     this.modeSummaryText.textContent = isRounds
-      ? 'Modo 1: Rodadas numeradas finitas, 25s de preparação entre ondas (com opção de antecipar) e inimigo de Elite a cada 5 rodadas.'
-      : 'Modo 2: Mundo aberto com grupos espalhados, exploração por setores e grandes hordas periódicas com aviso prévio de 60s.';
+      ? 'Enfrente ondas e prepare-se no intervalo.'
+      : 'Explore, recolha suprimentos e defenda seu abrigo.';
   }
 
   private refreshAimModeStyles(): void {
@@ -704,11 +690,11 @@ export class LobbyOverlay {
         : 'MODO: SOBREVIVÊNCIA POR RODADAS';
     this.lobbySeedBadge.textContent = `SEED: ${seed}`;
 
-    const pBlue = players.find((p) => p.colorIndex === 0);
-    const pOrange = players.find((p) => p.colorIndex === 1);
-
-    this.updateSlotCard(this.slotBlueEl, 'JOGADOR 1 (AZUL)', pBlue, localPlayerId);
-    this.updateSlotCard(this.slotOrangeEl, 'JOGADOR 2 (LARANJA)', pOrange, localPlayerId);
+    this.slotCards.forEach((card, index) => {
+      this.updateSlotCard(card, 'JOGADOR ' + (index + 1),
+        players.find((p) => p.colorIndex === index), localPlayerId);
+    });
+    const occupancy = players.length + '/' + BALANCE.NETWORK.MAX_PLAYERS_PER_ROOM;
 
     const localPlayer = players.find((p) => p.id === localPlayerId);
     if (localPlayer?.ready) {
@@ -721,15 +707,15 @@ export class LobbyOverlay {
 
     if (phase === 'countdown') {
       const secs = Math.max(1, Math.ceil(countdownMs / 1000));
-      this.phaseStatusText.textContent = `CONTAGEM REGRESSIVA: Iniciando em ${secs}s...`;
+      this.phaseStatusText.textContent = `${occupancy} na sala · Iniciando em ${secs}s...`;
       this.phaseStatusText.style.color = '#63cf88';
-    } else if (players.length < 2) {
+    } else if (players.length < BALANCE.NETWORK.MIN_PLAYERS_PER_ROOM) {
       this.phaseStatusText.textContent =
-        'Compartilhe o código de 5 caracteres com o 2º jogador.';
+        `${occupancy} na sala · Compartilhe o código com pelo menos mais um jogador.`;
       this.phaseStatusText.style.color = '#bfd1c6';
     } else {
       this.phaseStatusText.textContent =
-        '2/2 na sala! A partida começa quando os dois marcarem pronto.';
+        `${occupancy} na sala · A partida começa quando todos marcarem pronto.`;
       this.phaseStatusText.style.color = '#ffe066';
     }
 

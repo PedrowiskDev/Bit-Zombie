@@ -1,3 +1,4 @@
+import { createFullscreenControl } from './ui/fullscreen.js';
 import Phaser from 'phaser';
 import { BALANCE } from '@zombie-coop/shared';
 import { BootScene } from './scenes/BootScene.js';
@@ -8,7 +9,7 @@ const config: Phaser.Types.Core.GameConfig = {
   parent: 'app',
   width: BALANCE.VIEWPORT.WIDTH,
   height: BALANCE.VIEWPORT.HEIGHT,
-  backgroundColor: '#0c0f0d',
+  transparent: true,
   scale: {
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH,
@@ -25,3 +26,4 @@ const config: Phaser.Types.Core.GameConfig = {
 window.addEventListener('contextmenu', (e) => e.preventDefault());
 
 export const game = new Phaser.Game(config);
+createFullscreenControl();

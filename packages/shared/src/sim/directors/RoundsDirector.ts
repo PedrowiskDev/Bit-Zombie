@@ -41,7 +41,7 @@ export function computeRoundThreatBudget(
     BALANCE.ROUNDS.BASE_THREAT_BUDGET +
     (safeRound - 1) * BALANCE.ROUNDS.THREAT_BUDGET_PER_ROUND;
   const coopFactor =
-    activePlayerCount >= 2 ? BALANCE.ROUNDS.COOP_THREAT_MULTIPLIER : 1;
+    1 + Math.max(0, activePlayerCount - 1) * (BALANCE.ROUNDS.COOP_THREAT_MULTIPLIER - 1);
   return Math.max(6, Math.round(base * coopFactor));
 }
 
@@ -291,7 +291,11 @@ export class RoundsDirector {
         ? BALANCE.LOOT.STARTER_SLOW_ZOMBIE_SPEED_FACTOR
         : 1;
 
-      if (
+      if (roundNumber >= 6 && remainingBudget >= 4 && roll >= 0.72) {
+        const kind = roll < 0.82 ? 'demolisher' : roll < 0.92 ? 'spitter' : 'caller';
+        this.pendingQueue.push({ kind, isElite: false });
+        remainingBudget -= 4;
+      } else if (
         allowBrute &&
         remainingBudget >= BALANCE.ROUNDS.THREAT_COST.BRUTE &&
         roll < Math.min(0.26, 0.08 + roundNumber * 0.02)

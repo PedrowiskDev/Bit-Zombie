@@ -1,4 +1,5 @@
 import type { RenderWorldState } from '../network/WorldProvider.js';
+import type { GraphicsCounters } from '../render/FrameProfiler.js';
 
 /**
  * Painel de diagnóstico em tempo real ativado exclusivamente pelo parâmetro `?debug` na URL.
@@ -19,27 +20,36 @@ export class DebugOverlay {
     div.setAttribute('data-testid', 'debug-overlay');
     Object.assign(div.style, {
       position: 'fixed',
-      top: '14px',
-      right: '14px',
+      bottom: '14px',
+      left: '14px',
       backgroundColor: 'rgba(10, 15, 12, 0.88)',
       border: '1px solid #3c5444',
       borderRadius: '6px',
       padding: '8px 12px',
       fontFamily: 'monospace',
-      fontSize: '12px',
+      fontSize: '11px',
       lineHeight: '1.45',
       color: '#95f0b2',
       zIndex: '35',
       pointerEvents: 'none',
       fontVariantNumeric: 'tabular-nums',
       whiteSpace: 'pre',
+      maxWidth: 'calc(100vw - 28px)',
+      boxSizing: 'border-box',
     });
 
     document.body.appendChild(div);
     this.el = div;
   }
 
-  update(fps: number, state: RenderWorldState): void {
+  update(
+    fps: number,
+    state: RenderWorldState,
+    timings: readonly string[],
+    graphics: GraphicsCounters | undefined,
+    viewport: DOMRect,
+    batterySaver: boolean,
+  ): void {
     if (!this.enabled || !this.el) {
       return;
     }
@@ -52,7 +62,19 @@ export class DebugOverlay {
       `FPS: ${Math.round(fps)}  |  MODO: ${state.roomCode === 'SOLO' ? 'OFFLINE' : `ONLINE (${state.roomCode})`}`,
       `PING: ${pingMs} ms${simulatedLagMs > 0 ? ` (lag=${simulatedLagMs}ms)` : ''}  |  TICK: ${state.tick}`,
       `ENTIDADES: ${entitiesCount} (${state.players.length}P + ${state.zombies.length}Z)`,
-      `BANDA: RX ${rxBytesPerSec} B/s  |  TX ${txBytesPerSec} B/s  |  PEND: ${pendingInputsCount}`,
+      `RX ≈${rxBytesPerSec} B/s · TX ≈${txBytesPerSec} B/s · Fila ${pendingInputsCount}`,
+      `SEED ${state.seed} · ${state.gameMode} · ${Math.round(viewport.width)}×${Math.round(viewport.height)} CSS · DPR ${devicePixelRatio}`,
+      `Z na visão: ${document.body.dataset.visibleZombies ?? 0} · ${graphics?.quality ?? (batterySaver ? 'Economia' : 'Padrão')}`,
+      graphics
+        ? `Three: ${graphics.calls} chamadas · ${graphics.triangles} triângulos`
+        : 'Renderização 2D',
+      ...(graphics ? [
+        `Three: ${graphics.geometries} geometrias · ${graphics.textures} texturas · ${graphics.programs} programas`,
+        `DPR do Three: ${graphics.pixelRatio}`,
+        `Personagens animados: ${graphics.animatedActors}`,
+      ] : []),
+      '',
+      ...timings,
     ].join('\n');
   }
 

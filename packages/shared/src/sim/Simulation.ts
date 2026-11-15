@@ -1,3 +1,6 @@
+import { SUPPLY_SLOTS } from './supplies.js';
+import { ZombiePerception, type ZombieNoise } from './zombiePerception.js';
+import { generateUrbanMap, type UrbanMap } from './urbanMap.js';
 import { BALANCE, getXpForLevel } from '../config/balance.js';
 import { SpatialHashGrid } from '../math/collision.js';
 import { SeededRng } from '../math/rng.js';
@@ -89,6 +92,7 @@ import {
 } from './upgrades.js';
 import {
   buildObstaclesFromProps,
+  hasLineOfSight,
   resolveEntityObstacleCollisions,
   type SegmentObstacle,
   type VisionObstacles,
@@ -141,6 +145,11 @@ export class Simulation {
   private readonly mapHeight: number;
   private readonly enableAutoSpawn: boolean;
   private props: PropData[];
+  private urbanMap: UrbanMap;
+  private readonly zombiePerception = new ZombiePerception();
+  private readonly specialReadyAt = new Map<number, number>();
+  private zombieNoises: ZombieNoise[] = [];
+  private readonly doorAttackCooldowns = new Map<number, number>();
   private readonly wallSegments: SegmentObstacle[] = [];
   private visionObstacles: VisionObstacles;
   private readonly players: Map<string, PlayerStateSnapshot> = new Map();
@@ -185,22 +194,25 @@ export class Simulation {
     this.mapWidth = options.mapWidth ?? BALANCE.MAP.WIDTH;
     this.mapHeight = options.mapHeight ?? BALANCE.MAP.HEIGHT;
     this.enableAutoSpawn = options.enableAutoSpawn ?? true;
+    this.urbanMap = generateUrbanMap(this.seed, this.mapWidth, this.mapHeight);
     this.props = generateMapProps(this.seed);
     const generatedLoot = generateWorldLootAndContainers(
       this.seed,
       this.props,
       this.mapWidth,
-      this.mapHeight
+      this.mapHeight,
+      this.urbanMap.buildings
     );
     this.lootItems = generatedLoot.lootItems;
     this.lootContainers = generatedLoot.lootContainers;
     this.nextLootId = generatedLoot.nextLootId;
+    this.populateBuildings();
     this.visionObstacles = buildObstaclesFromProps(
       this.props,
-      this.wallSegments,
-      [],
+      [...this.wallSegments, ...this.urbanMap.walls, ...this.urbanMap.windows],
+      this.urbanMap.house?.furniture,
       this.lootContainers,
-      this.structures
+      [...this.structures, ...this.urbanMap.doors]
     );
 
     this.roundsDirector = new RoundsDirector(this.seed);
@@ -212,13 +224,109 @@ export class Simulation {
     );
   }
 
+  private populateBuildings(): void {
+    for (const b of this.urbanMap.buildings) {
+      const house = this.urbanMap.house;
+      const supply = house?.doorId === b.doorId ? house.supply : b;
+      const weaponId = b.name === 'Depósito' ? 'rifle' : b.name === 'Posto de combustível' ? 'shotgun' : null;
+      this.lootContainers.push({
+        id: this.nextLootId++, x: supply.x, y: supply.y, opened: false,
+        kind: weaponId ? 'weapon_case' : 'supply_crate', label: b.name,
+        rewards: {
+          wood: b.wood, scrap: b.scrap, medkits: b.medkits,
+          cloth: b.name === 'Pequena clínica' ? 3 : b.name === 'Casa' ? 2 : 0,
+          repairTools: b.name === 'Oficina' ? 2 : b.name === 'Posto de combustível' ? 1 : 0,
+        },
+        contents: weaponId ? [{
+          kind: 'weapon', weaponId, magAmmo: getWeaponDefinition(weaponId).magSize,
+          label: getWeaponDefinition(weaponId).name,
+        }] : [{ kind: 'ammo', ammoType: 'light', ammoAmount: 12, label: 'Munição leve' }],
+      });
+    }
+  }
+
+  private damageDoor(door: UrbanMap['doors'][number], damage: number): void {
+    if (door.hp <= 0) return;
+    door.hp = Math.max(0, door.hp - damage);
+    if (door.hp === 0) {
+      this.doorAttackCooldowns.delete(door.id);
+      this.zombieNoises.push({ x: door.x, y: door.y, radius: 480, kind: 'door' });
+      this.rebuildObstacles();
+    }
+  }
+
+  private stepSpecialZombies(players: readonly PlayerStateSnapshot[]): void {
+    for (const zombie of this.zombies) {
+      if (zombie.hp <= 0 || (zombie.kind !== 'spitter' && zombie.kind !== 'caller') ||
+          (this.specialReadyAt.get(zombie.id) ?? 0) > this.elapsedMs) continue;
+      const target = players.find((p) => p.alive && p.connected &&
+        Math.hypot(p.x - zombie.x, p.y - zombie.y) <= (zombie.kind === 'spitter' ? 235 : 420) &&
+        hasLineOfSight(zombie.x, zombie.y, p.x, p.y, this.visionObstacles, true));
+      if (!target) continue;
+      if (zombie.kind === 'caller') {
+        this.specialReadyAt.set(zombie.id, this.elapsedMs + 6500);
+        this.zombieNoises.push({ x: zombie.x, y: zombie.y, radius: 560, kind: 'call' });
+        continue;
+      }
+      if (target.invulnMs > 0) continue;
+      this.specialReadyAt.set(zombie.id, this.elapsedMs + 2400);
+      const damage = Math.min(target.hp, 12);
+      this.setPlayerHp(target.id, target.hp - damage);
+      target.invulnMs = Math.round(BALANCE.PLAYER.INVULN_DURATION_SEC * 1000);
+      this.emitEvent({ type: 'player_hit', playerId: target.id, zombieId: zombie.id,
+        damage, hpRemaining: target.hp, killed: !target.alive });
+    }
+  }
+
+  private stepDoorAttacks(dtMs: number): void {
+    for (const door of this.getDoors()) {
+      if (door.hp <= 0 || door.open) continue;
+      const remaining = (this.doorAttackCooldowns.get(door.id) ?? 0) - dtMs;
+      if (remaining > 0) {
+        this.doorAttackCooldowns.set(door.id, remaining);
+        continue;
+      }
+      this.doorAttackCooldowns.delete(door.id);
+      let damage = 0;
+      for (const zombie of this.zombies) {
+        if (zombie.hp > 0 && Math.abs(zombie.x - door.x) <= door.radius &&
+            Math.abs(zombie.y - door.y) <= zombie.radius + 6 &&
+            (door.y - zombie.y) * zombie.vy > 0) {
+          damage += getZombieStats(zombie.kind, zombie.isElite).contactDamage * (zombie.kind === 'demolisher' ? 3 : 1);
+        }
+      }
+      if (damage > 0) {
+        this.doorAttackCooldowns.set(door.id, BALANCE.STRUCTURES.ZOMBIE_ATTACK_INTERVAL_MS);
+        this.damageDoor(door, damage);
+      }
+    }
+  }
+
+  private getDoors(): BuildableStructureSnapshot[] {
+    return [...this.urbanMap.doors, ...this.structures.filter((s) => s.kind === 'shelter_door')];
+  }
+
+  private toggleNearbyDoor(player: PlayerStateSnapshot): boolean {
+    const door = this.getDoors().find((entry) => entry.hp > 0 &&
+      Math.abs(entry.x - player.x) < entry.radius &&
+      Math.abs(entry.y - player.y) <= 32);
+    if (!door) return false;
+    const occupants = [...this.getLivingPlayers(), ...this.zombies.filter((zombie) => zombie.hp > 0)];
+    if (door.open && occupants.some((entity) =>
+      Math.hypot(Math.max(0, Math.abs(entity.x - door.x) - door.radius), entity.y - door.y) <= entity.radius + 4
+    )) return false;
+    door.open = !door.open;
+    this.rebuildObstacles();
+    return true;
+  }
+
   private rebuildObstacles(): void {
     this.visionObstacles = buildObstaclesFromProps(
       this.props,
-      this.wallSegments,
-      [],
+      [...this.wallSegments, ...this.urbanMap.walls, ...this.urbanMap.windows],
+      this.urbanMap.house?.furniture,
       this.lootContainers,
-      this.structures
+      [...this.structures, ...this.urbanMap.doors]
     );
   }
 
@@ -247,6 +355,7 @@ export class Simulation {
   /** Remove props estáticos gerados proceduralmente (usado em testes unitários determinísticos de linha de visão) */
   clearPropsForTesting(): void {
     this.props = [];
+    this.urbanMap = { buildings: [], walls: [], windows: [], doors: [], house: undefined };
     this.rebuildObstacles();
   }
 
@@ -366,11 +475,67 @@ export class Simulation {
     if (!player || !Number.isFinite(amount) || amount <= 0) {
       return false;
     }
-    const delta = Math.round(amount);
-    if (kind === 'wood') {
-      player.wood = (player.wood ?? 0) + delta;
+    player[kind] = (player[kind] ?? 0) + Math.round(amount);
+    return true;
+  }
+
+  moveSupply(playerId: string, kind: unknown, amount: unknown, action: unknown): boolean {
+    const slot = SUPPLY_SLOTS.find((entry) => entry.kind === kind);
+    const player = this.players.get(playerId);
+    const inventory = this.inventoriesByPlayer.get(playerId);
+    if (this.gameOver || !slot || !player?.alive || !player.connected || !inventory ||
+        typeof amount !== 'number' || !Number.isSafeInteger(amount) || amount < 1 ||
+        (action !== 'drop' && action !== 'share' && action !== 'deposit' && action !== 'withdraw')) return false;
+
+    const supply = slot.kind;
+    const ammo = supply === 'light' || supply === 'shells' || supply === 'heavy';
+    const available = ammo ? inventory.ammoReserve[supply] : (player[supply] ?? 0);
+    const storage = this.structures.find((s) => s.kind === 'storage' && s.hp > 0 && s.supplies &&
+      Math.hypot(s.x - player.x, s.y - player.y) <= 88 &&
+      hasLineOfSight(player.x, player.y, s.x, s.y, this.visionObstacles, true))?.supplies;
+    if (action === 'withdraw') {
+      if (!storage || amount > (storage[supply] ?? 0)) return false;
+      storage[supply] = (storage[supply] ?? 0) - amount;
+      if (ammo) this.addAmmo(playerId, supply, amount);
+      else if (supply === 'medkits') this.addMedkit(playerId, amount);
+      else this.addResource(playerId, supply, amount);
+      return true;
+    }
+    if (amount > available) return false;
+
+    if (action === 'deposit') {
+      if (!storage) return false;
+      storage[supply] = (storage[supply] ?? 0) + amount;
+    } else if (action === 'share') {
+      const partner = this.getLivingPlayers().find((other) => other.id !== playerId && other.connected &&
+        Math.hypot(other.x - player.x, other.y - player.y) <= 96 &&
+        hasLineOfSight(player.x, player.y, other.x, other.y, this.visionObstacles, true));
+      if (!partner) return false;
+      if (ammo) this.addAmmo(partner.id, supply, amount);
+      else if (supply === 'medkits') this.addMedkit(partner.id, amount);
+      else this.addResource(partner.id, supply, amount);
     } else {
-      player.scrap = (player.scrap ?? 0) + delta;
+      const position = { x: player.x, y: player.y };
+      const existing = this.lootItems.find((item) => item.manualPickup && item.label === slot.label &&
+        Math.hypot(item.x - player.x, item.y - player.y) <= 8);
+      if (existing) {
+        if (ammo) existing.ammoAmount = (existing.ammoAmount ?? 0) + amount;
+        else existing.resourceAmount = (existing.resourceAmount ?? 0) + amount;
+      } else {
+        this.spawnLootItem({
+          ...position, label: slot.label, manualPickup: true,
+          ...(ammo ? { kind: 'ammo', ammoType: supply, ammoAmount: amount }
+            : supply === 'medkits' ? { kind: 'medkit', resourceAmount: amount }
+              : { kind: 'resource', resourceKind: supply, resourceAmount: amount }),
+        });
+      }
+    }
+
+    if (ammo) {
+      inventory.ammoReserve[supply] -= amount;
+      syncPlayerInventorySnapshotFields(player, inventory);
+    } else {
+      player[supply] = available - amount;
     }
     return true;
   }
@@ -396,14 +561,16 @@ export class Simulation {
       !player.alive ||
       !player.connected ||
       player.hp >= player.maxHp ||
-      (player.medkits ?? 0) <= 0
+      ((player.medkits ?? 0) <= 0 && (player.cloth ?? 0) <= 0)
     ) {
       return false;
     }
 
     const prevHp = player.hp;
-    player.medkits = Math.max(0, (player.medkits ?? 0) - 1);
-    player.hp = Math.min(player.maxHp, player.hp + BALANCE.SURVIVAL.MEDKIT_HEAL_HP);
+    const useKit = (player.medkits ?? 0) > 0;
+    if (useKit) player.medkits = (player.medkits ?? 0) - 1;
+    else player.cloth = (player.cloth ?? 0) - 1;
+    player.hp = Math.min(player.maxHp, player.hp + (useKit ? BALANCE.SURVIVAL.MEDKIT_HEAL_HP : 15));
     const restored = player.hp - prevHp;
 
     const healEv: Omit<PlayerHealedEvent, 'eventId' | 'tick'> = {
@@ -437,6 +604,14 @@ export class Simulation {
       return null;
     }
 
+    if (this.gameOver) return null;
+    const standard = kind === 'wood_barricade' || kind === 'scrap_barricade' || kind === 'spike_trap';
+    const marker = this.structures.find((s) => s.kind === 'shelter_marker' && s.hp > 0);
+    if (!standard && this.gameMode !== 'exploration') return null;
+    if (kind === 'shelter_marker' && marker) return null;
+    if (!standard && kind !== 'shelter_marker' && !marker) return null;
+    if (kind === 'storage' && this.structures.some((s) => s.kind === 'storage')) return null;
+
     const playerList = Array.from(this.players.values());
     const placement = findValidStructurePlacement(
       player,
@@ -447,7 +622,7 @@ export class Simulation {
       this.mapWidth,
       this.mapHeight
     );
-    if (!placement) {
+    if (!placement || (!standard && marker && Math.hypot(placement.x - marker.x, placement.y - marker.y) > 360)) {
       return null;
     }
 
@@ -458,12 +633,13 @@ export class Simulation {
       kind,
       x: placement.x,
       y: placement.y,
-      rotation: Number(player.facingAngle.toFixed(3)),
+      rotation: kind === 'shelter_door' ? 0 : Number(player.facingAngle.toFixed(3)),
       radius: def.radiusPx,
       hp: def.maxHp,
       maxHp: def.maxHp,
       ownerId: playerId,
       label: def.name,
+      supplies: kind === 'storage' ? {} : undefined,
       attackCooldownMs: 0,
       trapTickCooldownMs: 0,
     };
@@ -525,7 +701,7 @@ export class Simulation {
       const dx = s.x - player.x;
       const dy = s.y - player.y;
       const distSq = dx * dx + dy * dy;
-      if (distSq <= bestDistSq) {
+      if (distSq <= bestDistSq && hasLineOfSight(player.x, player.y, s.x, s.y, this.visionObstacles, true)) {
         bestDistSq = distSq;
         bestStruct = s;
       }
@@ -536,14 +712,12 @@ export class Simulation {
     }
 
     const prevHp = bestStruct.hp;
-    player.wood = Math.max(
-      0,
-      (player.wood ?? 0) - BALANCE.STRUCTURES.REPAIR_WOOD_COST
-    );
-    bestStruct.hp = Math.min(
-      bestStruct.maxHp,
-      bestStruct.hp + BALANCE.STRUCTURES.REPAIR_HP_AMOUNT
-    );
+    player.wood = (player.wood ?? 0) - BALANCE.STRUCTURES.REPAIR_WOOD_COST;
+    const useTool = (player.repairTools ?? 0) > 0 &&
+      bestStruct.maxHp - bestStruct.hp > BALANCE.STRUCTURES.REPAIR_HP_AMOUNT;
+    if (useTool) player.repairTools = (player.repairTools ?? 0) - 1;
+    bestStruct.hp = Math.min(bestStruct.maxHp, bestStruct.hp +
+      BALANCE.STRUCTURES.REPAIR_HP_AMOUNT * (useTool ? 2 : 1));
     const restored = bestStruct.hp - prevHp;
 
     const repEv: Omit<StructureRepairedEvent, 'eventId' | 'tick'> = {
@@ -601,6 +775,8 @@ export class Simulation {
       return false;
     }
 
+    if (this.toggleNearbyDoor(player)) return true;
+
     // 1. Procura o item de chão mais próximo dentro de PICKUP_RADIUS_PX
     const pickupRadiusSq =
       BALANCE.LOOT.PICKUP_RADIUS_PX * BALANCE.LOOT.PICKUP_RADIUS_PX;
@@ -612,7 +788,7 @@ export class Simulation {
       const dx = item.x - player.x;
       const dy = item.y - player.y;
       const distSq = dx * dx + dy * dy;
-      if (distSq <= bestItemDistSq) {
+      if (distSq <= bestItemDistSq && hasLineOfSight(player.x, player.y, item.x, item.y, this.visionObstacles, true)) {
         bestItemDistSq = distSq;
         bestItemIdx = i;
       }
@@ -679,7 +855,7 @@ export class Simulation {
       const dx = c.x - player.x;
       const dy = c.y - player.y;
       const distSq = dx * dx + dy * dy;
-      if (distSq <= bestContainerDistSq) {
+      if (distSq <= bestContainerDistSq && hasLineOfSight(player.x, player.y, c.x, c.y, this.visionObstacles, true)) {
         bestContainerDistSq = distSq;
         bestContainer = c;
       }
@@ -711,14 +887,16 @@ export class Simulation {
         }
       }
 
-      // Concede também recursos de sobrevivência (Madeira, Sucata e Kit Médico em Caixotes de Suprimento — Etapa 4)
-      player.wood =
-        (player.wood ?? 0) + BALANCE.SURVIVAL.CONTAINER_BONUS_WOOD;
-      player.scrap =
-        (player.scrap ?? 0) + BALANCE.SURVIVAL.CONTAINER_BONUS_SCRAP;
-      if (bestContainer.kind === 'supply_crate') {
-        player.medkits = (player.medkits ?? 0) + 1;
-      }
+      const rewards = bestContainer.rewards ?? {
+        wood: BALANCE.SURVIVAL.CONTAINER_BONUS_WOOD,
+        scrap: BALANCE.SURVIVAL.CONTAINER_BONUS_SCRAP,
+        medkits: bestContainer.kind === 'supply_crate' ? 1 : 0,
+      };
+      player.wood = (player.wood ?? 0) + rewards.wood;
+      player.scrap = (player.scrap ?? 0) + rewards.scrap;
+      player.medkits = (player.medkits ?? 0) + rewards.medkits;
+      player.cloth = (player.cloth ?? 0) + (rewards.cloth ?? 0);
+      player.repairTools = (player.repairTools ?? 0) + (rewards.repairTools ?? 0);
 
       syncPlayerInventorySnapshotFields(player, inv);
       const containerEv: Omit<LootPickedEvent, 'eventId' | 'tick'> = {
@@ -749,19 +927,26 @@ export class Simulation {
     }
     this.rng = new SeededRng(this.seed);
     this.upgradeRng = new SeededRng((this.seed ^ 0x9e3779b9) >>> 0);
+    this.urbanMap = generateUrbanMap(this.seed, this.mapWidth, this.mapHeight);
     this.props = generateMapProps(this.seed);
     this.wallSegments.length = 0;
+    this.doorAttackCooldowns.clear();
+    this.zombiePerception.reset();
+    this.specialReadyAt.clear();
+    this.zombieNoises = [];
     this.structures.length = 0;
     this.nextStructureId = 1;
     const generatedLoot = generateWorldLootAndContainers(
       this.seed,
       this.props,
       this.mapWidth,
-      this.mapHeight
+      this.mapHeight,
+      this.urbanMap.buildings
     );
     this.lootItems = generatedLoot.lootItems;
     this.lootContainers = generatedLoot.lootContainers;
     this.nextLootId = generatedLoot.nextLootId;
+    this.populateBuildings();
     this.rebuildObstacles();
 
     this.roundsDirector.reset(this.seed);
@@ -809,6 +994,8 @@ export class Simulation {
       player.wood = BALANCE.SURVIVAL.STARTING_WOOD;
       player.scrap = BALANCE.SURVIVAL.STARTING_SCRAP;
       player.medkits = BALANCE.SURVIVAL.STARTING_MEDKITS;
+      player.cloth = 0;
+      player.repairTools = 0;
 
       const freshInv = createInitialPlayerInventory(this.startingWeapon);
       this.inventoriesByPlayer.set(player.id, freshInv);
@@ -880,6 +1067,8 @@ export class Simulation {
       wood: BALANCE.SURVIVAL.STARTING_WOOD,
       scrap: BALANCE.SURVIVAL.STARTING_SCRAP,
       medkits: BALANCE.SURVIVAL.STARTING_MEDKITS,
+      cloth: 0,
+      repairTools: 0,
     };
 
     syncPlayerInventorySnapshotFields(player, inv);
@@ -1020,6 +1209,18 @@ export class Simulation {
         speedMultiplier: options?.speedMultiplier,
       }
     );
+    // New zombies start oriented toward the nearest survivor, then acquire targets by perception.
+    let closest = Infinity;
+    for (const player of this.players.values()) {
+      if (!player.alive) continue;
+      const dx = player.x - zombie.x;
+      const dy = player.y - zombie.y;
+      const distance = dx * dx + dy * dy;
+      if (distance < closest) {
+        closest = distance;
+        zombie.facingAngle = Math.atan2(dy, dx);
+      }
+    }
     this.zombies.push(zombie);
     return { ...zombie };
   }
@@ -1320,6 +1521,16 @@ export class Simulation {
         }
       );
 
+      const noises = this.zombieNoises;
+      this.zombieNoises = [];
+      if (this.tickCount % 5 === 0) {
+        for (const player of playerList) {
+          if (player.alive && Math.hypot(player.vx, player.vy) > BALANCE.PLAYER.SPEED_PX_PER_SEC * 0.8) {
+            noises.push({ x: player.x, y: player.y, radius: 250, kind: 'footsteps' });
+          }
+        }
+      }
+
       // 3. Movimento de perseguição dos zumbis existentes, separação suave e colisão com objetos sólidos do cenário
       stepZombiesMovementAndSeparation(
         this.zombies,
@@ -1328,20 +1539,25 @@ export class Simulation {
         this.mapWidth,
         this.mapHeight,
         this.spatialGrid,
-        this.visionObstacles
+        this.visionObstacles,
+        (zombie, players) => this.zombiePerception.target(
+          zombie, players, noises, this.elapsedMs, this.visionObstacles, this.urbanMap, this.mapWidth, this.mapHeight
+        )
       );
 
+      this.stepDoorAttacks(tickDtMs);
+      this.stepSpecialZombies(playerList);
+
       // 3b. Ataques de zumbis contra barricadas e dano/lentidão de armadilhas de espinhos (Etapa 4)
-      stepStructuresAndZombieInteractions({
-        structures: this.structures,
-        zombies: this.zombies,
-        dtMs: tickDtMs,
-        emitDamaged: (ev: Omit<StructureDamagedEvent, 'eventId' | 'tick'>) =>
-          this.emitEvent(ev),
-        onStructureDestroyed: () => {
-          this.rebuildObstacles();
-        },
+      stepStructuresAndZombieInteractions(this.structures, this.zombies, tickDtMs, {
+        emitStructureDamaged: (ev) => this.emitEvent(ev),
+        onStructureDestroyed: () => this.rebuildObstacles(),
         onZombieKilledByTrap: (zombie) => this.handleZombieKilled(zombie),
+        onTrapDamageDealt: (ownerId, damage) => {
+          this.totalDamageDealt += damage;
+          const owner = this.players.get(ownerId);
+          if (owner) owner.damageDealt = (owner.damageDealt ?? 0) + damage;
+        },
       });
 
       // 4. Colisão círculo-círculo jogador-zumbi e dano de contato com invulnerabilidade (0,8 s)
@@ -1393,7 +1609,11 @@ export class Simulation {
         (damage) => {
           this.totalDamageDealt = Number((this.totalDamageDealt + damage).toFixed(1));
         },
-        this.visionObstacles
+        this.visionObstacles,
+        (id, damage) => {
+          const door = this.getDoors().find((entry) => entry.id === id);
+          if (door) this.damageDoor(door, damage);
+        }
       );
 
       // 7. Diretor dedicado do modo ativo ('rounds' ou 'exploration'), isolando completamente os spawns de cada modo
@@ -1462,7 +1682,7 @@ export class Simulation {
         opened: c.opened,
         label: c.label,
       })),
-      structures: this.structures.map((s) => ({ ...s })),
+      structures: [...this.structures, ...this.urbanMap.doors].map((s) => ({ ...s, supplies: s.supplies ? { ...s.supplies } : undefined })),
     };
   }
 
@@ -1500,7 +1720,7 @@ export class Simulation {
       const item = this.lootItems[i];
       const dx = item.x - player.x;
       const dy = item.y - player.y;
-      if (dx * dx + dy * dy > walkRadiusSq) {
+      if (item.manualPickup || dx * dx + dy * dy > walkRadiusSq || !hasLineOfSight(player.x, player.y, item.x, item.y, this.visionObstacles, true)) {
         continue;
       }
 
@@ -1539,7 +1759,7 @@ export class Simulation {
 
       if (item.kind === 'medkit') {
         this.lootItems.splice(i, 1);
-        this.addMedkit(playerId, item.medkitAmount ?? 1);
+        this.addMedkit(playerId, item.resourceAmount ?? 1);
         const pickedEv: Omit<LootPickedEvent, 'eventId' | 'tick'> = {
           type: 'loot_picked',
           playerId,
@@ -1707,13 +1927,15 @@ export class Simulation {
   }
 
   private handleZombieKilled(zombie: ZombieStateSnapshot): void {
+    this.zombiePerception.forget(zombie.id);
+    this.specialReadyAt.delete(zombie.id);
     this.totalKills += 1;
     const stats = getZombieStats(zombie.kind, zombie.isElite);
     this.addSharedXp(stats.xp);
 
     // Concede recursos de sobrevivência para a dupla durante abates (Etapa 4)
     const awardScrap =
-      zombie.kind === 'brute' || zombie.kind === 'tank' || this.totalKills % 3 === 0;
+      zombie.kind === 'brute' || this.totalKills % 3 === 0;
     const awardWood = this.totalKills % 2 === 0;
     if (awardScrap || awardWood) {
       for (const p of this.players.values()) {
@@ -1768,6 +1990,11 @@ export class Simulation {
   }
 
   private emitEvent(event: DistributiveOmit<GameEvent, 'eventId' | 'tick'>): void {
+    if (event.type === 'weapon_noise' && event.weaponId !== 'knife' && event.radiusPx > 0) {
+      this.zombieNoises.push({ x: event.x, y: event.y, radius: event.radiusPx, kind: 'action' });
+    } else if (event.type === 'structure_built') {
+      this.zombieNoises.push({ x: event.x, y: event.y, radius: 360, kind: 'action' });
+    }
     this.pendingEvents.push({
       ...event,
       eventId: this.nextEventId++,

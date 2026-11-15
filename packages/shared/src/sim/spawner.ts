@@ -39,6 +39,15 @@ export function getZombieStats(kind: ZombieKind, isElite = false): ZombieStatsCo
         xp: BALANCE.ZOMBIES.BRUTE.XP,
       };
       break;
+    case 'demolisher':
+      base = { hp: 115, speedPxPerSec: 53, contactDamage: 12, contactCooldownSec: 1, radius: 19, xp: 5 };
+      break;
+    case 'spitter':
+      base = { hp: 48, speedPxPerSec: 63, contactDamage: 6, contactCooldownSec: 1, radius: 13, xp: 4 };
+      break;
+    case 'caller':
+      base = { hp: 65, speedPxPerSec: 59, contactDamage: 7, contactCooldownSec: 1, radius: 15, xp: 4 };
+      break;
     case 'common':
     default:
       base = {

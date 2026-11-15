@@ -20,6 +20,7 @@ export class UpgradePickerOverlay {
     this.onSelectUpgrade = onSelectUpgrade;
 
     this.rootEl = document.createElement('div');
+    this.rootEl.className = 'interface-card upgrade-card-panel';
     this.rootEl.setAttribute('data-testid', 'upgrade-picker-overlay');
     Object.assign(this.rootEl.style, {
       position: 'fixed',
@@ -101,7 +102,7 @@ export class UpgradePickerOverlay {
     }
 
     const secLeft = Math.max(1, Math.ceil(remainingMs / 1000));
-    this.titleEl.textContent = `SUBIU DE NÍVEL! ESCOLHA UM UPGRADE (1-3 OU TOQUE) · ${secLeft}s`;
+    this.titleEl.textContent = `Escolha uma melhoria · ${secLeft}s`;
 
     const nextKey = validOptions.join(',');
     if (!this.visible) {

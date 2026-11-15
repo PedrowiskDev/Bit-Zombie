@@ -38,14 +38,17 @@ export type EquippedSlotId = 'knife' | 'slot1' | 'slot2';
 export type MeleeAttackPhase = 'idle' | 'windup' | 'active' | 'recovery';
 
 /** Tipos de recursos de construção e fortificação (Etapa 4) */
-export type ResourceKind = 'wood' | 'scrap';
+export type ResourceKind = 'wood' | 'scrap' | 'cloth' | 'repairTools';
+export type SupplyKind = ResourceKind | 'medkits' | Exclude<AmmoType, 'none'>;
 
 /** Tipos de estruturas e fortificações construíveis pelo jogador (Etapa 4) */
-export type StructureKind = 'wood_barricade' | 'scrap_barricade' | 'spike_trap';
+export type StructureKind = 'wood_barricade' | 'scrap_barricade' | 'spike_trap' | 'slow_trap' | 'shelter_marker' | 'shelter_wall' | 'shelter_door' | 'storage';
 
 export interface BuildableStructureSnapshot {
   id: number;
-  kind: StructureKind;
+  kind: StructureKind | 'map_door';
+  open?: boolean;
+  supplies?: Partial<Record<SupplyKind, number>>;
   x: number;
   y: number;
   rotation: number;
@@ -70,6 +73,7 @@ export interface WorldLootItemSnapshot {
   ammoAmount?: number;
   resourceKind?: ResourceKind;
   resourceAmount?: number;
+  manualPickup?: boolean;
   label: string;
 }
 
@@ -143,7 +147,7 @@ export interface PropData {
 }
 
 /** Três tipos base de zumbis */
-export type ZombieKind = 'common' | 'fast' | 'brute';
+export type ZombieKind = 'common' | 'fast' | 'brute' | 'demolisher' | 'spitter' | 'caller';
 
 export interface ZombieStateSnapshot {
   id: number;
@@ -232,6 +236,8 @@ export interface PlayerStateSnapshot {
   wood?: number;
   /** Quantidade de Sucata disponível para fortificações e armadilhas (Etapa 4) */
   scrap?: number;
+  cloth?: number;
+  repairTools?: number;
   /** Quantidade de Kits Médicos disponíveis para cura rápida (Etapa 4) */
   medkits?: number;
 }
@@ -469,6 +475,7 @@ export interface HordeWarningEvent extends BaseGameEvent {
   type: 'horde_warning';
   hordeNumber: number;
   warningMs: number;
+  direction?: 'Norte' | 'Leste' | 'Sul' | 'Oeste';
 }
 
 export interface HordeStartedEvent extends BaseGameEvent {

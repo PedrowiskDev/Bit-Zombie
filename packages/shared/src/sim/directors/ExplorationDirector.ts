@@ -50,7 +50,7 @@ export function computeHordeThreatBudget(
     BALANCE.EXPLORATION.BASE_HORDE_THREAT_BUDGET +
     (safeHorde - 1) * BALANCE.EXPLORATION.HORDE_THREAT_GROWTH;
   const coopFactor =
-    activePlayerCount >= 2 ? BALANCE.ROUNDS.COOP_THREAT_MULTIPLIER : 1;
+    1 + Math.max(0, activePlayerCount - 1) * (BALANCE.ROUNDS.COOP_THREAT_MULTIPLIER - 1);
   return Math.max(12, Math.round(base * coopFactor));
 }
 
@@ -76,6 +76,17 @@ export class ExplorationDirector {
 
   private explorationPhase: ExplorationSubPhase = 'exploring';
   private hordeNumber = 0;
+  private hordeDirectionIndex = 0;
+  private hordeOrigin?: { x: number; y: number };
+
+  private planHorde(players: readonly PlayerStateSnapshot[]): void {
+    this.hordeDirectionIndex = this.rng.nextInt(0, 3);
+    const angle = (this.hordeDirectionIndex - 1) * Math.PI / 2;
+    const x = players.reduce((sum, p) => sum + p.x, 0) / players.length;
+    const y = players.reduce((sum, p) => sum + p.y, 0) / players.length;
+    this.hordeOrigin = clampPositionToArena(x + Math.cos(angle) * 760, y + Math.sin(angle) * 760,
+      32, this.mapWidth, this.mapHeight);
+  }
   private hordesCleared = 0;
   private timeUntilNextHordeMs: number;
   private recoveryRemainingMs = 0;
@@ -128,6 +139,7 @@ export class ExplorationDirector {
 
     this.explorationPhase = 'exploring';
     this.hordeNumber = 0;
+    this.hordeOrigin = undefined;
     this.hordesCleared = 0;
     this.timeUntilNextHordeMs = this.firstHordeDelayMs;
     this.recoveryRemainingMs = 0;
@@ -194,15 +206,18 @@ export class ExplorationDirector {
         this.timeUntilNextHordeMs > 0
       ) {
         this.explorationPhase = 'horde_warning';
+        this.planHorde(livingPlayers);
         callbacks.emitHordeWarning({
           type: 'horde_warning',
           hordeNumber: this.hordeNumber + 1,
           warningMs: this.timeUntilNextHordeMs,
+          direction: (['Norte', 'Leste', 'Sul', 'Oeste'] as const)[this.hordeDirectionIndex],
         });
       }
 
       // Quando o cronômetro zera, inicia a horda periódica finita
       if (this.timeUntilNextHordeMs <= 0) {
+        if (!this.hordeOrigin) this.planHorde(livingPlayers);
         this.startPeriodicHorde(livingPlayers.length, callbacks);
       }
       return;
@@ -221,6 +236,10 @@ export class ExplorationDirector {
       const spawned = callbacks.spawnZombieFromDirector(next.kind, {
         isElite: next.isElite,
         spawnSource: 'horde',
+        position: this.hordeOrigin && {
+          x: this.hordeOrigin.x + this.rng.nextRange(-65, 65),
+          y: this.hordeOrigin.y + this.rng.nextRange(-65, 65),
+        },
       });
       if (spawned) {
         this.pendingHordeQueue.shift();
@@ -242,6 +261,7 @@ export class ExplorationDirector {
     if (this.pendingHordeQueue.length === 0 && activeHordeZombies === 0) {
       this.hordesCleared += 1;
       this.explorationPhase = 'recovery';
+      this.hordeOrigin = undefined;
       this.recoveryRemainingMs = this.recoveryWindowMs;
 
       callbacks.emitHordeCleared({
@@ -432,7 +452,11 @@ export class ExplorationDirector {
 
     while (remaining > 0) {
       const roll = this.rng.nextFloat();
-      if (
+      if (hordeNumber >= 2 && remaining >= 4 && roll >= 0.72) {
+        const kind = roll < 0.82 ? 'demolisher' : roll < 0.92 ? 'spitter' : 'caller';
+        this.pendingHordeQueue.push({ kind, isElite: false });
+        remaining -= 4;
+      } else if (
         remaining >= BALANCE.ROUNDS.THREAT_COST.BRUTE &&
         roll < Math.min(0.28, 0.12 + hordeNumber * 0.04)
       ) {

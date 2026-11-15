@@ -3,6 +3,9 @@ import {
   BALANCE,
   buildObstaclesFromProps,
   generateMapProps,
+  generateUrbanMap,
+  isValidStructureKind,
+  SUPPLY_SLOTS,
   interpolateRemoteEntities,
   normalizeInputVector,
   reconcileLocalPlayer,
@@ -78,6 +81,8 @@ interface RemotePlayerSchemaView {
   wood?: number;
   scrap?: number;
   medkits?: number;
+  cloth?: number;
+  repairTools?: number;
 }
 
 interface RemoteZombieSchemaView {
@@ -95,6 +100,8 @@ interface RemoteZombieSchemaView {
 }
 
 interface RemoteLootItemSchemaView {
+  resourceKind?: string;
+  resourceAmount?: number;
   id: number;
   kind: string;
   x: number;
@@ -116,6 +123,9 @@ interface RemoteLootContainerSchemaView {
 }
 
 interface RemoteStructureSchemaView {
+  rotation?: number;
+  supplies: Map<string, number>;
+  open?: boolean;
   id: number;
   kind: string;
   x: number;
@@ -174,6 +184,7 @@ interface RemoteRoomStateView {
 }
 
 export interface OnlineProviderCallbacks {
+  onDangerPing?: (ping: { x: number; y: number; colorIndex: number }) => void;
   onPhaseChange?: (phase: RoomPhase, roomCode: string) => void;
   onConnectionLost?: (reason: string) => void;
 }
@@ -220,6 +231,7 @@ export class OnlineProvider implements IWorldProvider {
   private weaponDamage: number = BALANCE.PISTOL.DAMAGE;
   private weaponFireRate: number = BALANCE.PISTOL.FIRE_RATE_PER_SEC;
   private lastLevelBonusLabel = '';
+  private urbanMap = generateUrbanMap(BALANCE.SIMULATION.DEFAULT_SEED);
   private props: PropData[] = generateMapProps(BALANCE.SIMULATION.DEFAULT_SEED);
   private visionObstacles: VisionObstacles = buildObstaclesFromProps(this.props);
 
@@ -276,6 +288,7 @@ export class OnlineProvider implements IWorldProvider {
   // Fila de eventos transitórios (fire, hit, player_hit) com regra de consumo único
   private pendingEvents: GameEvent[] = [];
   private lastConsumedEventId = 0;
+  private eventSeed?: number;
 
   // Telemetria (Ping e Bytes/s)
   private pingMs = 0;
@@ -308,8 +321,8 @@ export class OnlineProvider implements IWorldProvider {
   private rebuildLocalVisionObstacles(): void {
     this.visionObstacles = buildObstaclesFromProps(
       this.props,
-      [],
-      [],
+      [...this.urbanMap.walls, ...this.urbanMap.windows],
+      this.urbanMap.house?.furniture,
       Array.from(this.authoritativeLootContainers.values()),
       Array.from(this.authoritativeStructures.values())
     );
@@ -368,6 +381,10 @@ export class OnlineProvider implements IWorldProvider {
     return new OnlineProvider(client, room, simulatedLagMs, callbacks);
   }
 
+  sendDangerPing(): void {
+    this.sendWithOptionalLag('danger_ping', {});
+  }
+
   setReady(ready?: boolean): void {
     const payload = ready !== undefined ? { ready } : {};
     this.sendWithOptionalLag('ready', payload);
@@ -399,6 +416,10 @@ export class OnlineProvider implements IWorldProvider {
 
   buildStructure(kind: StructureKind): void {
     this.sendWithOptionalLag('build_structure', { kind });
+  }
+
+  moveSupply(kind: import('@zombie-coop/shared').SupplyKind, amount: number, action: 'drop' | 'share' | 'deposit' | 'withdraw'): void {
+    this.sendWithOptionalLag('move_supply', { kind, amount, action });
   }
 
   repairStructure(): void {
@@ -750,9 +771,11 @@ export class OnlineProvider implements IWorldProvider {
           });
         };
         syncStructure();
-        $(structure).onChange(() => {
-          syncStructure();
-        });
+        $(structure).onChange(syncStructure);
+        if (structure.supplies) {
+          $(structure).supplies.onAdd(syncStructure);
+          $(structure).supplies.onChange(syncStructure);
+        }
       });
 
       $(room.state).structures.onRemove((structure) => {
@@ -764,12 +787,22 @@ export class OnlineProvider implements IWorldProvider {
       });
     }
 
+    room.onMessage('danger_ping', (ping: { x: number; y: number; colorIndex: number }) => {
+      this.callbacks.onDangerPing?.(ping);
+    });
     room.onMessage('events', (events: GameEvent[]) => {
       if (!Array.isArray(events)) {
         return;
       }
+      const eventSeed = room.state.seed;
       this.rxBytesWindow += events.length * 28;
       this.runWithOptionalInboundLag(() => {
+        if (room !== this.room || eventSeed !== room.state.seed) return;
+        if (eventSeed !== this.eventSeed) {
+          this.eventSeed = eventSeed;
+          this.pendingEvents = [];
+          this.lastConsumedEventId = 0;
+        }
         for (const ev of events) {
           if (ev.eventId > this.lastConsumedEventId) {
             this.lastConsumedEventId = ev.eventId;
@@ -821,6 +854,7 @@ export class OnlineProvider implements IWorldProvider {
           this.lastReconnectionToken
         );
         this.room = reconnectedRoom;
+        this.pendingEvents = [];
         this.reconnecting = false;
         this.bindRoomHandlers(reconnectedRoom);
         return;
@@ -942,8 +976,9 @@ export class OnlineProvider implements IWorldProvider {
       totalSectors: 64,
     };
 
-    if (s.seed && s.seed !== prevSeed) {
+    if (s.seed !== prevSeed) {
       this.seed = s.seed;
+      this.urbanMap = generateUrbanMap(s.seed);
       this.props = generateMapProps(s.seed);
       this.rebuildLocalVisionObstacles();
     }
@@ -1092,12 +1127,15 @@ export class OnlineProvider implements IWorldProvider {
       wood: p.wood ?? BALANCE.SURVIVAL.STARTING_WOOD,
       scrap: p.scrap ?? BALANCE.SURVIVAL.STARTING_SCRAP,
       medkits: p.medkits ?? BALANCE.SURVIVAL.STARTING_MEDKITS,
+      cloth: p.cloth ?? 0,
+      repairTools: p.repairTools ?? 0,
     };
   }
 
   private extractZombieSnapshot(z: RemoteZombieSchemaView): ZombieStateSnapshot {
     const kind: ZombieKind =
-      z.kind === 'fast' || z.kind === 'brute' ? z.kind : 'common';
+      z.kind === 'fast' || z.kind === 'brute' || z.kind === 'demolisher' ||
+      z.kind === 'spitter' || z.kind === 'caller' ? z.kind : 'common';
     return {
       id: z.id,
       kind,
@@ -1116,7 +1154,7 @@ export class OnlineProvider implements IWorldProvider {
   private extractLootItemSnapshot(
     item: RemoteLootItemSchemaView
   ): WorldLootItemSnapshot {
-    const kind = item.kind === 'ammo' ? 'ammo' : 'weapon';
+    const kind = item.kind === 'ammo' || item.kind === 'resource' || item.kind === 'medkit' ? item.kind : 'weapon';
     const weaponId: WeaponId | undefined =
       item.weaponId === 'bat' ||
       item.weaponId === 'pistol' ||
@@ -1142,6 +1180,9 @@ export class OnlineProvider implements IWorldProvider {
       magAmmo: item.magAmmo || undefined,
       ammoType,
       ammoAmount: item.ammoAmount || undefined,
+      resourceAmount: item.resourceAmount,
+      resourceKind: item.resourceKind === 'wood' || item.resourceKind === 'scrap' ||
+        item.resourceKind === 'cloth' || item.resourceKind === 'repairTools' ? item.resourceKind : undefined,
       label: item.label || '',
     };
   }
@@ -1164,16 +1205,19 @@ export class OnlineProvider implements IWorldProvider {
   private extractStructureSnapshot(
     s: RemoteStructureSchemaView
   ): BuildableStructureSnapshot {
-    const kind: StructureKind =
-      s.kind === 'scrap_barricade' || s.kind === 'spike_trap'
+    const kind: BuildableStructureSnapshot['kind'] =
+      s.kind === 'map_door' || isValidStructureKind(s.kind)
         ? s.kind
         : 'wood_barricade';
     return {
       id: s.id,
       kind,
+      open: s.open,
       x: s.x,
       y: s.y,
-      rotation: 0,
+      rotation: s.rotation ?? 0,
+      supplies: kind === 'storage' ? Object.fromEntries(SUPPLY_SLOTS.map(({ kind: supply }) =>
+        [supply, s.supplies?.get(supply) ?? 0])) : undefined,
       radius: s.radius || 20,
       hp: s.hp,
       maxHp: s.maxHp || 180,

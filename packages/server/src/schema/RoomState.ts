@@ -46,6 +46,8 @@ export class PlayerSchema extends Schema {
   @type('string') meleePhase: string = 'idle';
   @type('number') wood: number = BALANCE.SURVIVAL.STARTING_WOOD;
   @type('number') scrap: number = BALANCE.SURVIVAL.STARTING_SCRAP;
+  @type('number') cloth = 0;
+  @type('number') repairTools = 0;
   @type('number') medkits: number = BALANCE.SURVIVAL.STARTING_MEDKITS;
 }
 
@@ -64,6 +66,8 @@ export class ZombieSchema extends Schema {
 }
 
 export class LootItemSchema extends Schema {
+  @type('number') resourceAmount = 0;
+  @type('string') resourceKind = '';
   @type('number') id: number = 0;
   @type('string') kind: string = 'weapon';
   @type('number') x: number = 0;
@@ -85,6 +89,9 @@ export class LootContainerSchema extends Schema {
 }
 
 export class StructureSchema extends Schema {
+  @type('number') rotation = 0;
+  @type({ map: 'number' }) supplies = new MapSchema<number>();
+  @type('boolean') open = false;
   @type('number') id: number = 0;
   @type('string') kind: string = 'wood_barricade';
   @type('number') x: number = 0;

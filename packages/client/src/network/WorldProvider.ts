@@ -151,6 +151,7 @@ export interface IWorldProvider {
    * Repara a fortificação danificada mais próxima gastando 1 Madeira (Etapa 4).
    */
   repairStructure?(): void;
+  moveSupply?(kind: import('@zombie-coop/shared').SupplyKind, amount: number, action: 'drop' | 'share' | 'deposit' | 'withdraw'): void;
 
   /**
    * Usa 1 Kit Médico para restaurar HP do jogador local (Etapa 4).

@@ -5,7 +5,7 @@
 
 export const BALANCE = {
   /** Versão do protocolo de rede e contratos de simulação */
-  PROTOCOL_VERSION: 1,
+  PROTOCOL_VERSION: 2,
 
   /** Frequência fixa da simulação autoritativa */
   SIMULATION: {
@@ -23,7 +23,9 @@ export const BALANCE = {
     ROOM_CODE_LENGTH: 5,
     /** Alfabeto sem O, 0, I, 1 */
     ROOM_CODE_ALPHABET: 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789',
-    MAX_PLAYERS_PER_ROOM: 2,
+    MAX_PLAYERS_PER_ROOM: 6,
+    MIN_PLAYERS_PER_ROOM: 2,
+    PLAYER_COLORS: [0x2b95ff, 0xff7b29, 0x77d66b, 0xcd83f2, 0xffd45c, 0x56d8cc],
     COUNTDOWN_DURATION_MS: 3000,
     RECONNECT_GRACE_SEC: 20,
     MAX_INPUT_RATE_PER_SEC: 40,

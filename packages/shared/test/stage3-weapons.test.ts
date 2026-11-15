@@ -358,7 +358,7 @@ describe('Etapa 3 — Começar com faca e encontrar armas, munição, recarga e 
 
     // Verifica que os itens estão mais escassos (2 iniciais + 10 no mundo = 12 itens; 8 recipientes no total)
     expect(initialSnap.lootItems?.length).toBe(12);
-    expect(initialSnap.lootContainers?.length).toBe(8);
+    expect(initialSnap.lootContainers?.length).toBe(14);
 
     // Escolhe um prop circular (crate, bush ou rubble) e verifica bloqueio frontal + ausência de penetração em qualquer tick
     const targetProp =

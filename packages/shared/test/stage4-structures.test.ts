@@ -143,7 +143,7 @@ describe('Etapa 4 — Abrigo, Recursos, Fortificação (Barricadas/Armadilhas/Re
       initialZombieHp - BALANCE.STRUCTURES.SPIKE_TRAP.DAMAGE_PER_TICK
     );
     expect(snap.structures![0].hp).toBe(
-      trap.maxHp - BALANCE.STRUCTURES.SPIKE_TRAP.SELF_DAMAGE_PER_TICK
+      trap.maxHp - BALANCE.STRUCTURES.SPIKE_TRAP.SELF_WEAR_PER_HIT
     );
   });
 

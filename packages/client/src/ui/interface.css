@@ -1,0 +1,169 @@
+:root {
+  --ui-ink: #f3ecdc;
+  --ui-muted: #b4b19f;
+  --ui-panel: #191c17;
+  --ui-edge: #484a3a;
+  --ui-accent: #e5ba77;
+  --ui-font: "Barlow", system-ui, sans-serif;
+}
+
+.interface-card, .hud-stack, .mobile-quick-items {
+  color: var(--ui-ink);
+  font-family: var(--ui-font) !important;
+}
+
+.interface-card {
+  background: linear-gradient(155deg, #23261d, #161813 72%) !important;
+  border: 1px solid var(--ui-edge) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 22px 75px #0009 !important;
+}
+
+#lobby-overlay {
+  align-items: safe center !important;
+  padding: max(16px, var(--safe-top)) max(14px, var(--safe-right))
+    max(68px, var(--safe-bottom)) max(14px, var(--safe-left)) !important;
+  background: radial-gradient(ellipse at 50% 18%, #39392b82, transparent 68%), #0d100eea !important;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+
+.lobby-card { width: min(100%, 500px) !important; padding: clamp(16px, 5vw, 32px) !important; }
+.lobby-heading { margin: 0 0 18px; }
+.lobby-heading h1 {
+  margin: 0;
+  color: var(--ui-accent);
+  font: 800 clamp(40px, 10vw, 66px)/.96 "Barlow Condensed", var(--ui-font);
+  letter-spacing: .015em;
+}
+.lobby-menu { display: grid; gap: 10px; }
+.lobby-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.lobby-actions button { margin: 0 !important; font-size: 15px !important; }
+.mode-selection { margin: 0 !important; }
+.lobby-menu form { margin: 0 !important; }
+
+.interface-card button, .hud-stack button, .mobile-quick-items button, #fullscreen-toggle {
+  background: #292d23 !important;
+  color: var(--ui-ink) !important;
+  border: 1px solid #535643 !important;
+  border-radius: 7px !important;
+  font-family: var(--ui-font) !important;
+  font-weight: 700 !important;
+  letter-spacing: .015em !important;
+}
+
+.interface-card button[aria-pressed="true"], .hud-stack button[aria-pressed="true"] {
+  border-color: var(--ui-accent) !important;
+  color: var(--ui-accent) !important;
+  background: #383425 !important;
+}
+.lobby-card [data-testid="btn-play-offline"],
+.lobby-card [data-testid="btn-toggle-ready"],
+.results-card [data-testid="play-again-btn"], .pause-card button {
+  background: var(--ui-accent) !important;
+  color: #211c13 !important;
+  border-color: #e5ba77 !important;
+}
+.interface-card button:disabled, .hud-stack button:disabled { opacity: .48 !important; cursor: default; }
+button:focus-visible, summary:focus-visible, input:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
+.interface-details > summary {
+  cursor: pointer;
+  color: var(--ui-ink);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.lobby-menu > .interface-details { border-top: 1px solid var(--ui-edge); }
+.lobby-menu > .interface-details > summary { color: var(--ui-muted); }
+
+.hud-stack {
+  position: fixed;
+  top: calc(10px + var(--safe-top));
+  left: calc(10px + var(--safe-left));
+  width: min(360px, calc(100% - 20px - var(--safe-left) - var(--safe-right)));
+  z-index: 29;
+  pointer-events: none;
+  display: grid;
+  gap: 4px;
+}
+.hud-stack[hidden] { display: none; }
+.game-minimap {
+  position: fixed;
+  top: calc(60px + var(--safe-top));
+  right: calc(10px + var(--safe-right));
+  width: clamp(104px, 14vw, 152px);
+  height: auto;
+  box-sizing: border-box;
+  border: 1px solid #77765b;
+  border-radius: 9px;
+  box-shadow: 0 4px 16px #0008;
+  pointer-events: none;
+}
+.game-minimap[hidden] { display: none; }
+@media (max-width: 510px) {
+  .game-minimap {
+    position: static;
+    justify-self: end;
+  }
+}
+.hud-stack > div {
+  position: relative !important;
+  inset: auto !important;
+  max-width: 100% !important;
+  gap: 5px !important;
+  padding: 7px 9px !important;
+  background: #161913ed !important;
+  border: 1px solid #484a3ac9 !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 16px #0004 !important;
+  font-family: var(--ui-font) !important;
+}
+.hud-stack > [data-testid="hud-survival-bar"] { justify-content: flex-start !important; }
+.hud-stack [data-testid="hud-status-text"] { font-size: 14px !important; }
+.hud-stack [data-testid="hud-metrics-text"], .hud-stack .team-status { color: var(--ui-muted); }
+.hud-stack [data-testid="hud-ammo-status"] { color: var(--ui-accent) !important; font-variant-numeric: tabular-nums; }
+.hud-stack [data-testid="hud-xp-fill"] { background: #b48f57 !important; }
+.hud-stack [data-testid="pause-offline"] { min-height: 32px !important; }
+.hud-stack details { pointer-events: auto; }
+.hud-stack summary { border-radius: 6px; }
+.hud-stack details[open] > summary { color: var(--ui-accent); }
+.construction-actions, .hud-settings[open] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+.controls-summary { width: 100%; margin: 3px 0; color: var(--ui-muted); font-size: 12px; }
+.construction-actions > [data-testid="hud-resources-status"],
+.construction-actions > div { width: 100%; }
+.hud-stack [data-testid="btn-hud-aim-mode"] {
+  position: static !important;
+  transform: none !important;
+}
+.desktop-quick-heal:empty { display: none; }
+.pause-card::backdrop { background: #0c0f0bb5; }
+.results-card { max-height: 92dvh; overflow-y: auto; touch-action: pan-y; }
+[data-testid="level-up-banner"] { color: var(--ui-accent) !important; }
+[data-testid="hud-hint-bar"] { display: none !important; }
+
+@media (pointer: coarse) {
+  .hud-stack { width: min(325px, calc(100% - 20px - var(--safe-left) - var(--safe-right))); }
+  .hud-stack [data-testid="pause-offline"] { min-height: 48px !important; }
+  #survival-inventory { max-height: 29dvh !important; }
+  .hud-settings, .hud-construction { max-width: 100%; }
+  .hud-stack :is(button, summary) { font-size: 12px !important; }
+  .hud-stack summary { align-content: center; }
+  [data-testid="btn-ping-danger"] {
+    bottom: calc(clamp(142px, 17dvh + 76px, 210px) + var(--safe-bottom)) !important;
+    right: calc(24px + var(--safe-right)) !important;
+  }
+}
+
+@media (pointer: coarse) and (orientation: landscape) {
+  .hud-stack { width: min(310px, 46vw); }
+  .hud-stack > div { padding-block: 4px !important; }
+}

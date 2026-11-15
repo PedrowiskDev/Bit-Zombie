@@ -1,3 +1,4 @@
+import type { UrbanMap } from './urbanMap.js';
 import { BALANCE } from '../config/balance.js';
 import { SeededRng } from '../math/rng.js';
 import { clampPositionToArena } from '../math/vec2.js';
@@ -253,6 +254,7 @@ export interface PlayerWeaponInventory {
 }
 
 export interface InternalLootContainer extends LootContainerSnapshot {
+  rewards?: { wood: number; scrap: number; medkits: number; cloth?: number; repairTools?: number };
   contents: Array<
     | {
         kind: 'weapon';
@@ -577,14 +579,22 @@ function findSafeLootCoordinates(
   props: readonly PropData[],
   mapWidth: number,
   mapHeight: number,
-  existingPositions: ReadonlyArray<{ x: number; y: number }> = [],
-  minItemSpacingPx = 64
+  existingPositions: ReadonlyArray<{ x: number; y: number }>,
+  minItemSpacingPx: number,
+  buildings: UrbanMap['buildings']
 ): { x: number; y: number } {
   const clamped = clampPositionToArena(rawX, rawY, 36, mapWidth, mapHeight);
   let x = clamped.x;
   let y = clamped.y;
 
   for (let attempt = 0; attempt < 12; attempt += 1) {
+    const building = buildings.find((b) => Math.abs(x - b.x) < b.halfWidth + 36 &&
+      Math.abs(y - b.y) < b.halfHeight + 36);
+    if (building) {
+      const offset = x - building.x;
+      x = building.x + (offset < 0 ? -1 : 1) * (building.halfWidth + 37);
+      continue;
+    }
     let conflictX: number | null = null;
     let conflictY: number | null = null;
     let pushOutDist = 64;
@@ -648,7 +658,8 @@ export function generateWorldLootAndContainers(
   seed: number,
   props: readonly PropData[],
   mapWidth: number,
-  mapHeight: number
+  mapHeight: number,
+  buildings: UrbanMap['buildings'] = []
 ): {
   lootItems: WorldLootItemSnapshot[];
   lootContainers: InternalLootContainer[];
@@ -681,7 +692,7 @@ export function generateWorldLootAndContainers(
       mapWidth,
       mapHeight,
       occupiedPositions,
-      90
+      90, buildings
     );
     occupiedPositions.push(pos);
     lootItems.push({
@@ -707,7 +718,7 @@ export function generateWorldLootAndContainers(
       mapWidth,
       mapHeight,
       occupiedPositions,
-      210
+      210, buildings
     );
     occupiedPositions.push(pos);
 
@@ -763,7 +774,7 @@ export function generateWorldLootAndContainers(
       mapWidth,
       mapHeight,
       occupiedPositions,
-      220
+      220, buildings
     );
     occupiedPositions.push(pos);
 

@@ -112,15 +112,11 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
     for (const p of this.state.players.values()) {
       usedColors.add(p.colorIndex);
     }
-    const colorIndex = usedColors.has(0) ? 1 : 0;
-    const spawnOffset = colorIndex === 0 ? -28 : 28;
+    const colorIndex = BALANCE.NETWORK.PLAYER_COLORS.findIndex((_, index) => !usedColors.has(index));
 
     const simPlayer = this.sim.addPlayer(
       client.sessionId,
-      {
-        x: BALANCE.PLAYER.SPAWN_X + spawnOffset,
-        y: BALANCE.PLAYER.SPAWN_Y,
-      },
+      this.getSpawnPosition(colorIndex),
       colorIndex
     );
 
@@ -133,6 +129,7 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
     this.inputQueues.set(client.sessionId, new PlayerInputQueue());
 
     this.syncSimulationToSchema();
+    this.evaluateLobbyReadiness();
     this.syncRegistrySummary();
   }
 
@@ -149,10 +146,7 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
       this.state.players.delete(sessionId);
       this.inputQueues.delete(sessionId);
 
-      if (this.state.phase === 'countdown') {
-        this.state.phase = 'lobby';
-        this.state.countdownMs = this.countdownDurationMs;
-      }
+      this.evaluateLobbyReadiness();
       this.syncRegistrySummary();
       return;
     }
@@ -301,6 +295,12 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
       }
     });
 
+    this.onMessage('move_supply', (client, payload: unknown) => {
+      if (this.state.phase !== 'playing' || !payload || typeof payload !== 'object') return;
+      const { kind, amount, action } = payload as Record<string, unknown>;
+      if (this.sim.moveSupply(client.sessionId, kind, amount, action)) this.syncSimulationToSchema();
+    });
+
     this.onMessage('interact_loot', (client) => {
       if (this.state.phase !== 'playing') {
         return;
@@ -361,6 +361,18 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
       }
     });
 
+    const dangerPingAt = new WeakMap<Client, number>();
+    this.onMessage('danger_ping', (client) => {
+      if (this.state.phase !== 'playing') return;
+      const player = this.state.players.get(client.sessionId);
+      const now = this.state.elapsedMs;
+      if (!player?.alive || !player.connected || now - (dangerPingAt.get(client) ?? -Infinity) < 1500) return;
+      dangerPingAt.set(client, now);
+      const x = Math.max(24, Math.min(BALANCE.MAP.WIDTH - 24, player.x + Math.cos(player.facingAngle) * 180));
+      const y = Math.max(24, Math.min(BALANCE.MAP.HEIGHT - 24, player.y + Math.sin(player.facingAngle) * 180));
+      this.broadcast('danger_ping', { x, y, colorIndex: player.colorIndex }, { except: client });
+    });
+
     this.onMessage('ping', (client, payload: unknown) => {
       const clientSentAt =
         typeof payload === 'object' &&
@@ -377,17 +389,25 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
     });
   }
 
+  private getSpawnPosition(colorIndex: number): { x: number; y: number } {
+    const angle = Math.PI + colorIndex * Math.PI * 2 / this.maxClients;
+    return {
+      x: BALANCE.PLAYER.SPAWN_X + Math.cos(angle) * 40,
+      y: BALANCE.PLAYER.SPAWN_Y + Math.sin(angle) * 40,
+    };
+  }
+
   private evaluateLobbyReadiness(): void {
     const playerList = Array.from(this.state.players.values());
-    const bothPresentAndReady =
-      playerList.length === BALANCE.NETWORK.MAX_PLAYERS_PER_ROOM &&
+    const groupReady =
+      playerList.length >= BALANCE.NETWORK.MIN_PLAYERS_PER_ROOM &&
       playerList.every((p) => p.ready && p.connected);
 
-    if (this.state.phase === 'lobby' && bothPresentAndReady) {
+    if (this.state.phase === 'lobby' && groupReady) {
       this.state.phase = 'countdown';
       this.state.countdownMs = this.countdownDurationMs;
       this.syncRegistrySummary();
-    } else if (this.state.phase === 'countdown' && !bothPresentAndReady) {
+    } else if (this.state.phase === 'countdown' && !groupReady) {
       this.state.phase = 'lobby';
       this.state.countdownMs = this.countdownDurationMs;
       this.syncRegistrySummary();
@@ -448,13 +468,9 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
         this.inputQueues.delete(sessionId);
         continue;
       }
-      const spawnOffset = oldSchema.colorIndex === 0 ? -28 : 28;
       this.sim.addPlayer(
         sessionId,
-        {
-          x: BALANCE.PLAYER.SPAWN_X + spawnOffset,
-          y: BALANCE.PLAYER.SPAWN_Y,
-        },
+        this.getSpawnPosition(oldSchema.colorIndex),
         oldSchema.colorIndex
       );
       this.sim.setPlayerReady(sessionId, true);
@@ -570,10 +586,12 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
         lSchema.weaponId = item.weaponId ?? '';
         lSchema.magAmmo = item.magAmmo ?? 0;
         lSchema.ammoType = item.ammoType ?? '';
-        lSchema.ammoAmount = item.ammoAmount ?? 0;
+        lSchema.resourceKind = item.resourceKind ?? '';
         lSchema.label = item.label;
         this.state.lootItems.set(key, lSchema);
       }
+      lSchema.ammoAmount = item.ammoAmount ?? 0;
+      lSchema.resourceAmount = item.resourceAmount ?? 0;
     }
     for (const existingKey of Array.from(this.state.lootItems.keys())) {
       if (!activeLootKeys.has(existingKey)) {
@@ -617,12 +635,19 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
         sSchema.x = s.x;
         sSchema.y = s.y;
         sSchema.radius = s.radius;
+        sSchema.rotation = s.rotation;
         sSchema.maxHp = s.maxHp;
         sSchema.ownerId = s.ownerId;
         sSchema.label = s.label;
         this.state.structures.set(key, sSchema);
       }
       sSchema.hp = s.hp;
+      sSchema.open = s.open ?? false;
+      if (s.supplies) {
+        for (const [kind, amount] of Object.entries(s.supplies)) {
+          if (sSchema.supplies.get(kind) !== amount) sSchema.supplies.set(kind, amount);
+        }
+      }
     }
     for (const existingKey of Array.from(this.state.structures.keys())) {
       if (!activeStructureKeys.has(existingKey)) {
@@ -674,6 +699,8 @@ export class SurvivalRoom extends Room<SurvivalRoomState> {
     dst.wood = src.wood ?? 0;
     dst.scrap = src.scrap ?? 0;
     dst.medkits = src.medkits ?? 0;
+    dst.cloth = src.cloth ?? 0;
+    dst.repairTools = src.repairTools ?? 0;
   }
 
   private syncRegistrySummary(): void {
